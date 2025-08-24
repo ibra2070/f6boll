@@ -78,7 +78,7 @@
   <div class="container">
     <img src="logo.png" alt="Logo" class="logo" />
     <h1>Enter Game Code</h1>
-    <input type="text" id="videoCode" placeholder="e.g. their-game" />
+    <input type="text" id="videoCode" placeholder="e.g. footballove" />
     <br />
     <button onclick="redirectToVideo()">Watch</button>
   </div>
@@ -87,7 +87,8 @@
     function redirectToVideo() {
       const code = document.getElementById('videoCode').value.trim();
       if (code) {
-        window.location.href = `https://fision-videos-worker.myfisionupload.workers.dev/${code}.mp4`;
+        // UPDATED: send users to the HLS player page with the code in the query
+        window.location.href = `watch.html?code=${encodeURIComponent(code)}`;
       }
     }
   </script>

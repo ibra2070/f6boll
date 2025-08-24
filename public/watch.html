@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Watch</title>
+  <style>
+    body { margin:0; background:#000; color:#fff; display:grid; place-items:center; min-height:100vh; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { width:100%; max-width:960px; padding:16px; }
+    video { width:100%; height:auto; background:#000; }
+    .msg { margin-top:12px; opacity:.85; font-size:14px; }
+    a { color:#00ff88; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <video id="video" controls playsinline></video>
+    <div id="status" class="msg">Loading…</div>
+    <div class="msg"><a href="index.html">← Back</a></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('video');
+
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code') || '';
+    if (!code) {
+      statusEl.textContent = 'Missing ?code=…';
+      throw new Error('Missing code');
+    }
+
+    const BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
+    // Your Worker stores keys under "videos/", and your HLS name is "stream_0.m3u8"
+    const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/stream_0.m3u8`;
+
+    function setStatus(t){ statusEl.textContent = t; }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus('Playing HLS…'));
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data?.fatal) setStatus('HLS fatal error: ' + data.type);
+      });
+      hls.loadSource(m3u8Url);
+      hls.attachMedia(video);
+      video.play().catch(()=>{});
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari
+      video.src = m3u8Url;
+      video.play().catch(()=>{});
+      setStatus('Playing with native HLS…');
+    } else {
+      setStatus('HLS not supported in this browser.');
+    }
+  </script>
+</body>
+</html>
