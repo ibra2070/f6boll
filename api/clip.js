@@ -1,30 +1,37 @@
-// api/clip.js — Vercel Node serverless (CommonJS)
-// Streams a 0–10 min MP4 by remuxing HLS (no re-encode).
-// Robust against ENOENT by preferring @ffmpeg-installer/ffmpeg and verifying the path.
+// api/clip.js — Vercel Serverless (Node / CommonJS)
+// Remux HLS to MP4, 0–10 min. Handles ffmpeg packaging and avoids 0-byte files.
 
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { spawn } = require('child_process');
-
-// Resolve ffmpeg path (prefer @ffmpeg-installer/ffmpeg, fallback to ffmpeg-static)
-function resolveFfmpegPath() {
-  const candidates = [];
-  try { const p = require('@ffmpeg-installer/ffmpeg').path; if (p) candidates.push(p); } catch {}
-  try { const p = require('ffmpeg-static');                 if (p) candidates.push(p); } catch {}
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  return null;
-}
-
-const ffmpegPath = resolveFfmpegPath();
-if (!ffmpegPath) {
-  throw new Error('FFmpeg binary not found at runtime. Did you add includeFiles in vercel.json and install @ffmpeg-installer/ffmpeg?');
-}
-
 
 const BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
 const PLAYLIST = 'stream_0.m3u8';
 const MAX_LEN = 600; // 10 minutes
+
+function resolveFfmpegSource() {
+  try {
+    const p = require('@ffmpeg-installer/ffmpeg').path;
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  try {
+    const p = require('ffmpeg-static');
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  return null;
+}
+
+function prepareFfmpeg() {
+  const src = resolveFfmpegSource();
+  if (!src) throw new Error('FFmpeg not found; install @ffmpeg-installer/ffmpeg or ffmpeg-static and include in vercel.json');
+  const dst = path.join(os.tmpdir(), 'ffmpeg-bin');
+  if (!fs.existsSync(dst) || fs.statSync(dst).size !== fs.statSync(src).size) {
+    fs.copyFileSync(src, dst);
+    try { fs.chmodSync(dst, 0o755); } catch {}
+  }
+  return dst;
+}
 
 module.exports = async (req, res) => {
   try {
@@ -32,61 +39,84 @@ module.exports = async (req, res) => {
     const code  = (q.code || '').trim();
     const start = parseFloat(q.start || '0');
     const end   = parseFloat(q.end   || '0');
-
     if (!code || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
       res.statusCode = 400; return res.end('Bad params: code/start/end');
     }
     const duration = +(end - start).toFixed(3);
-    if (duration > MAX_LEN) { res.statusCode = 400; return res.end(`Max clip length is ${MAX_LEN}s`); }
+    if (duration > MAX_LEN) {
+      res.statusCode = 400; return res.end(`Max clip length is ${MAX_LEN}s`);
+    }
 
     const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
+    const ffmpeg = prepareFfmpeg();
 
     const args = [
-      '-hide_banner','-loglevel','error',
-      '-protocol_whitelist','file,crypto,data,http,https,tcp,tls',
+      '-hide_banner', '-loglevel', 'error',
+      '-rw_timeout', '15000000',                 // 15s read timeout
+      '-user_agent', 'FisionClipper/1.0',
+      '-protocol_whitelist', 'file,crypto,data,http,https,tcp,tls',
       '-ss', String(start),
       '-t', String(duration),
       '-i', m3u8Url,
-      '-c','copy',
-      '-bsf:a','aac_adtstoasc',
-      '-movflags','+faststart',
-      '-f','mp4',
+      '-map', '0:v?', '-map', '0:a?',            // tolerate missing tracks
+      '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',
+      '-movflags', '+faststart',
+      '-f', 'mp4',
       'pipe:1'
     ];
 
-    console.log('Using ffmpeg at:', ffmpegPath); // <— shows up in Vercel function logs
+    const proc = spawn(ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    const proc = spawn(ffmpegPath, args, { stdio: ['ignore','pipe','pipe'] });
-
-    // Kill ffmpeg if client cancels
+    // Cancel if client leaves
     req.on('aborted', () => { try { proc.kill('SIGKILL'); } catch {} });
 
-    // Stream MP4 out
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Disposition', `attachment; filename="clip_${code}_${Math.floor(start)}-${Math.floor(end)}.mp4"`);
-    proc.stdout.pipe(res);
-
+    let sentHeaders = false;
+    let hadData = false;
     let errLog = '';
-    proc.stderr.on('data', d => { errLog += d.toString(); });
 
-    proc.on('close', codeExit => {
-      if (codeExit !== 0) {
-        console.error('ffmpeg exit', codeExit, errLog);
-        if (!res.headersSent) {
-          res.statusCode = 500;
-          res.end(`ffmpeg failed (code ${codeExit})\n${errLog.slice(0, 2000)}`);
-        }
+    // IMPORTANT FIX: write the **first chunk** before piping
+    proc.stdout.once('data', (chunk) => {
+      hadData = true;
+      if (!sentHeaders) {
+        sentHeaders = true;
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="clip_${code}_${Math.floor(start)}-${Math.floor(end)}.mp4"`
+        );
       }
+      // write the chunk that triggered 'data' (otherwise it gets lost)
+      res.write(chunk);
+      // then pipe the rest
+      proc.stdout.pipe(res);
     });
 
-    proc.on('error', e => {
+    proc.stderr.on('data', d => { errLog += d.toString(); });
+
+    proc.on('close', (codeExit) => {
+      if (!hadData) {
+        // ffmpeg produced nothing: return a clear error instead of an empty file
+        if (!sentHeaders) {
+          res.statusCode = 500;
+          const msg = (errLog.trim() || `ffmpeg exited with code ${codeExit}`).slice(0, 2000);
+          return res.end(msg);
+        }
+      }
+      try { if (!res.writableEnded) res.end(); } catch {}
+      if (codeExit !== 0) console.error('ffmpeg exit', codeExit, errLog);
+    });
+
+    proc.on('error', (e) => {
       console.error('ffmpeg spawn error', e);
-      try {
-        if (!res.headersSent) res.statusCode = 500;
+      if (!sentHeaders) {
+        res.statusCode = 500;
         res.end('ffmpeg spawn error: ' + (e.message || e));
-      } catch {}
+      } else {
+        try { res.end(); } catch {}
+      }
     });
   } catch (e) {
     console.error('handler error', e);
