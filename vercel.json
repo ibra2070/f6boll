@@ -1,7 +1,6 @@
 {
   "functions": {
     "api/clip.js": {
-      "runtime": "nodejs20.x",
       "maxDuration": 300,
       "memory": 1024,
       "includeFiles": "node_modules/@ffmpeg-installer/ffmpeg/**"

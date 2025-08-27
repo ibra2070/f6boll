@@ -21,8 +21,6 @@ if (!ffmpegPath) {
   throw new Error('FFmpeg binary not found at runtime. Did you add includeFiles in vercel.json and install @ffmpeg-installer/ffmpeg?');
 }
 
-// Force **Node** runtime (not Edge)
-module.exports.config = { runtime: 'nodejs20.x' };
 
 const BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
 const PLAYLIST = 'stream_0.m3u8';
