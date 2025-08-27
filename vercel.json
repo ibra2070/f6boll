@@ -4,10 +4,7 @@
       "runtime": "nodejs20.x",
       "maxDuration": 300,
       "memory": 1024,
-      "includeFiles": [
-        "node_modules/@ffmpeg-installer/**",
-        "node_modules/ffmpeg-static/**"
-      ]
+      "includeFiles": "node_modules/@ffmpeg-installer/ffmpeg/**"
     }
   }
 }
