@@ -1,12 +1,12 @@
-# mp4-clipper/Dockerfile
 FROM node:20-slim
 
-# Install tools + fetch a stable static FFmpeg (includes libx264/aac)
+ENV NODE_ENV=production
+
+# Tools + fetch a stable static FFmpeg (includes x264/aac)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
-# Download linux64 static FFmpeg and place binaries in PATH
 RUN set -eux; \
   curl -sL https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz \
   | tar -xJ && \
@@ -16,9 +16,14 @@ RUN set -eux; \
   rm -rf ffmpeg-*-amd64-static
 
 WORKDIR /app
+
+# Install deps first (use lockfile if present)
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev || npm install --omit=dev
+
+# Copy the rest of the app
 COPY . .
 
+# Render provides PORT, your code already reads process.env.PORT
 EXPOSE 8080
 CMD ["node", "server.js"]
