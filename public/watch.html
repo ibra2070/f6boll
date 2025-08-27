@@ -2,198 +2,199 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Watch</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Watch & Download Clip (MP4)</title>
   <style>
-    :root { --accent:#00ff88; --bg:#000; --fg:#fff; }
-    body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-    .wrap { max-width:960px; margin:0 auto; padding:16px; }
-    video { width:100%; height:auto; background:#000; border-radius:12px; }
-    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
-    .btn { padding:10px 14px; border:0; border-radius:8px; background:var(--accent); color:#000; font-weight:600; cursor:pointer; }
-    .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .chip { padding:8px 12px; border-radius:999px; border:1px solid #2a2a2a;color:#fff;background:#111; cursor:pointer; }
-    .msg { opacity:.85; font-size:14px; margin-top:8px; }
-    a { color: var(--accent); text-decoration:none; }
-    .range { font-variant-numeric: tabular-nums; }
+    :root { --green:#00ff88; --bg:#0b0b0b; --muted:#9aa1a8; }
+    *{box-sizing:border-box} body{
+      margin:0; background:#0b0b0b url('./background.png') center/cover fixed no-repeat;
+      color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell;
+      min-height:100dvh; display:flex; flex-direction:column; gap:16px; padding:16px;
+      backdrop-filter:brightness(.45);
+    }
+    .card{ max-width:960px; width:100%; margin:0 auto; background:rgba(0,0,0,.7);
+      border-radius:16px; padding:16px; box-shadow:0 0 20px rgba(0,255,0,.25); }
+    .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center }
+    input[type=text]{ flex:1; min-width:180px; padding:10px 12px; border-radius:10px; border:none; }
+    button{
+      padding:10px 14px; border:none; border-radius:10px; background:var(--green); color:#000;
+      font-weight:600; cursor:pointer; transition:filter .15s;
+    }
+    button.secondary{ background:#202225; color:#fff; border:1px solid #2a2d33 }
+    button:disabled{ opacity:.5; cursor:not-allowed }
+    button:hover{ filter:brightness(.95) }
+    video{ width:100%; max-height:55dvh; background:#000; border-radius:12px; }
+    .chips button{ background:#1b1d21; color:#fff } .muted{ color:var(--muted) }
+    .spacer{ flex:1 } .tag{ padding:2px 8px; border-radius:999px; background:#1b1d21; font-size:12px }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <video id="video" controls playsinline muted poster="poster.jpg"></video>
-    <div id="status" class="msg">Loading…</div>
+  <div class="card">
+    <div class="row" style="align-items:center; gap:12px">
+      <img src="./logo.png" alt="logo" style="width:42px;height:42px;border-radius:50%;box-shadow:0 0 10px rgba(0,255,0,.5)">
+      <div class="spacer"></div>
+      <span class="tag">MP4 exporter</span>
+    </div>
 
-    <!-- Clipper UI -->
-    <div class="row">
-      <button id="setA" class="btn">Set Start (A)</button>
-      <button id="setB" class="btn">Set End (B)</button>
-      <span id="rangeLabel" class="range">A: —  B: —</span>
-      <a href="index.html" style="margin-left:auto">← Back</a>
+    <!-- controls -->
+    <div class="row" style="margin-top:12px">
+      <input id="code" type="text" placeholder="Enter game code e.g. mo2nes1" />
+      <button id="loadBtn">Load</button>
     </div>
-    <div class="row">
-      <button class="chip" data-preset="15">+15s</button>
-      <button class="chip" data-preset="30">+30s</button>
-      <button class="chip" data-preset="60">+60s</button>
-      <button class="chip" data-preset="120">+120s</button>
-      <button id="preview" class="btn">Preview</button>
-      <button id="download" class="btn">Download</button>
+
+    <!-- player -->
+    <div style="margin-top:12px">
+      <video id="vid" controls playsinline></video>
+      <div class="muted" style="margin-top:6px">
+        Time: <span id="tNow">0:00</span> / <span id="tDur">0:00</span>
+      </div>
     </div>
-    <div class="msg" id="note">Tip: clips up to 10 minutes export fastest.</div>
+
+    <!-- A/B + preview -->
+    <div class="row" style="margin-top:14px; gap:10px">
+      <button id="setA">Set Start (A)</button>
+      <button id="setB">Set End (B)</button>
+      <div class="muted">A: <span id="valA">—</span> &nbsp; B: <span id="valB">—</span></div>
+      <div class="spacer"></div>
+      <button class="secondary" id="previewBtn">Preview</button>
+      <button class="secondary" id="cancelPreviewBtn">Cancel Preview</button>
+      <button id="downloadBtn">Download MP4</button>
+    </div>
+
+    <!-- quick jumps -->
+    <div class="row chips" style="margin-top:10px">
+      <button data-skip="15">+15s</button>
+      <button data-skip="30">+30s</button>
+      <button data-skip="60">+60s</button>
+      <button data-skip="120">+120s</button>
+    </div>
+
+    <div class="muted" style="margin-top:10px">
+      Tip: set A/B then Preview. Download creates an MP4 clip (H.264/AAC, faststart) that’s friendly for Instagram/TikTok.
+    </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <!-- hls.js for non-Safari browsers -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
   <script>
-    const statusEl = document.getElementById('status');
-    const video = document.getElementById('video');
-    const $setA = document.getElementById('setA');
-    const $setB = document.getElementById('setB');
-    const $preview = document.getElementById('preview');
-    const $download = document.getElementById('download');
-    const $range = document.getElementById('rangeLabel');
+    // ---- elements ----
+    const els = {
+      code: document.getElementById('code'),
+      load: document.getElementById('loadBtn'),
+      vid: document.getElementById('vid'),
+      tNow: document.getElementById('tNow'),
+      tDur: document.getElementById('tDur'),
+      setA: document.getElementById('setA'),
+      setB: document.getElementById('setB'),
+      valA: document.getElementById('valA'),
+      valB: document.getElementById('valB'),
+      preview: document.getElementById('previewBtn'),
+      cancelPreview: document.getElementById('cancelPreviewBtn'),
+      download: document.getElementById('downloadBtn'),
+      chips: document.querySelectorAll('.chips button'),
+    };
 
-    const MAX_SECONDS = 600; // 10 min
-
-    // read ?code=
-    const params = new URLSearchParams(location.search);
-    const code = params.get('code') || '';
-    if (!code) {
-      statusEl.textContent = 'Missing ?code=…';
-      throw new Error('Missing code');
-    }
-
-    // Your Worker playlist URL
-    const BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
-    const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/stream_0.m3u8`;
-
-    function setStatus(t){ statusEl.textContent = t; }
-
-    // ---- Set up HLS playback ----
-    if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
-      hls.on(Hls.Events.MANIFEST_PARSED, () => setStatus('Ready'));
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data?.fatal) setStatus('HLS fatal error: ' + data.type);
-      });
-      hls.loadSource(m3u8Url);
-      hls.attachMedia(video);
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = m3u8Url;            // Safari
-      video.addEventListener('loadedmetadata', ()=> setStatus('Ready'));
-    } else {
-      setStatus('HLS not supported in this browser.');
-    }
-
-    // ---- Simple preview logic: start looping; auto-cancel on any change ----
+    // ---- state ----
     let A = null, B = null;
-    let isPreviewing = false;
-    let loopCb = null;
+    let hls = null;
+    let previewTimer = null, prevTime = 0;
 
-    function fmt(t){
-      if (t == null) return '—';
-      const s = Math.max(0, Math.floor(t));
-      const mm = String(Math.floor(s/60)).padStart(2,'0');
-      const ss = String(s%60).padStart(2,'0');
-      return `${mm}:${ss}`;
+    // ---- utils ----
+    const fmt = s => {
+      s = Math.max(0, s|0);
+      const m = (s/60)|0, ss = s%60; 
+      return m + ':' + String(ss).padStart(2,'0');
+    };
+    const getQP = k => new URLSearchParams(location.search).get(k);
+
+    // ---- load video (HLS) ----
+    const HLS_BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
+    const PLAYLIST = 'stream_0.m3u8';
+    async function loadVideo() {
+      const code = (els.code.value || '').trim();
+      if (!code) return alert('Enter a game code');
+      const src = `${HLS_BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
+
+      // destroy old instance
+      if (hls) { hls.destroy(); hls = null; }
+      els.vid.pause(); els.vid.removeAttribute('src'); els.vid.load();
+
+      if (window.Hls && Hls.isSupported()) {
+        hls = new Hls({ enableWorker: true });
+        hls.loadSource(src);
+        hls.attachMedia(els.vid);
+      } else if (els.vid.canPlayType('application/vnd.apple.mpegurl')) {
+        els.vid.src = src; // Safari
+      } else {
+        alert('HLS is not supported in this browser.');
+        return;
+      }
     }
-    function paint(){ $range.textContent = `A: ${fmt(A)}   B: ${fmt(B)}`; }
 
-    function startPreview() {
-      if (A == null || B == null || B <= A) return alert('Set a valid A and B first.');
-      stopPreview(false); // ensure clean state
-      isPreviewing = true;
-      loopCb = () => {
-        if (!isPreviewing) return;
-        if (video.currentTime >= B - 0.05) video.currentTime = A;
-      };
-      video.addEventListener('timeupdate', loopCb);
-      video.currentTime = A;
-      video.play().catch(()=>{});
+    // ---- A/B ----
+    function setA() { A = Math.floor(els.vid.currentTime); els.valA.textContent = fmt(A); }
+    function setB() { B = Math.floor(els.vid.currentTime); els.valB.textContent = fmt(B); }
+
+    // ---- preview ----
+    async function previewClip() {
+      if (!Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
+        return alert('Set valid A and B first.');
+      }
+      if (previewTimer) { cancelPreview(); }
+      prevTime = els.vid.currentTime;
+      els.vid.currentTime = A;
+      try { await els.vid.play(); } catch {}
+      previewTimer = setTimeout(cancelPreview, (B - A) * 1000);
+      els.preview.disabled = true;
     }
-    function stopPreview(pause = false) {
-      if (!isPreviewing) return;
-      isPreviewing = false;
-      if (loopCb) { video.removeEventListener('timeupdate', loopCb); loopCb = null; }
-      if (pause) video.pause();
+    function cancelPreview() {
+      if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+      try { els.vid.pause(); } catch {}
+      els.vid.currentTime = prevTime || A || 0;
+      els.preview.disabled = false;
     }
 
-    $preview.addEventListener('click', () => startPreview());
-
-    // Auto-cancel preview when user "gets out" of setup
-    video.addEventListener('seeking', () => stopPreview(false));
-    video.addEventListener('pause',   () => stopPreview(false));
-
-    $setA.addEventListener('click', () => {
-      stopPreview(false);
-      A = video.currentTime;
-      if (B != null && B <= A) B = Math.min(A + 5, (video.duration || A + 5));
-      paint();
-    });
-    $setB.addEventListener('click', () => {
-      stopPreview(false);
-      B = video.currentTime;
-      if (A != null && B <= A) A = Math.max(0, B - 5);
-      paint();
-    });
-
-    document.querySelectorAll('[data-preset]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        stopPreview(false);
-        const n = +btn.dataset.preset;
-        if (A == null) A = video.currentTime;
-        B = Math.min((video.duration || A + n), A + n);
-        paint();
-      });
-    });
-
-    // ---- Download via serverless API (/api/clip) ----
-    $download.addEventListener('click', async () => {
-      stopPreview(true); // leave preview mode and pause
-
-      if (A == null || B == null || B <= A) return alert('Set a valid A and B first.');
-      const len = B - A;
-      if (len > MAX_SECONDS) return alert('Please keep clips ≤ 10 minutes');
-
-      setStatus('Preparing clip…');
-
+    // ---- download MP4 via /api/clip (Vercel rewrite -> Render) ----
+    async function downloadClip() {
+      const code = (els.code.value || '').trim();
+      if (!code || !Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
+        return alert('Enter code and set valid A/B times.');
+      }
       const url = `/api/clip?code=${encodeURIComponent(code)}&start=${A.toFixed(2)}&end=${B.toFixed(2)}`;
+
       const res = await fetch(url);
       if (!res.ok) {
-        const txt = await res.text().catch(()=>res.statusText);
-        setStatus('Clip failed');
-        return alert('Clip failed: ' + txt);
+        const t = await res.text().catch(()=>res.statusText);
+        return alert('Download failed: ' + t);
       }
-
       const blob = await res.blob();
-      const filename = `clip_${code}_${Math.floor(A)}-${Math.floor(B)}.mp4`;
+      const name = `clip_${code}_${A}-${B}.mp4`;
 
-      // Mobile: try native share
-      if (navigator.share && blob.type === 'video/mp4') {
-        try {
-          const file = new File([blob], filename, { type: 'video/mp4' });
-          await navigator.share({ files: [file], title: 'Clip' });
-          setStatus('Shared!');
-          return;
-        } catch {}
+      // Share on mobile if possible
+      if (navigator.share && navigator.canShare?.({ files:[new File([blob], name, { type:'video/mp4' })] })) {
+        try { await navigator.share({ files:[new File([blob], name, { type:'video/mp4' })], title:'Clip' }); return; } catch {}
       }
+      // Fallback: save
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+    }
 
-      // Desktop: force download reliably
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.rel = 'noopener';
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      requestAnimationFrame(() => {
-        a.click();
-        requestAnimationFrame(() => {
-          URL.revokeObjectURL(a.href);
-          a.remove();
-          setStatus('Downloaded');
-        });
-      });
-    });
+    // ---- events ----
+    els.load.onclick = loadVideo;
+    els.setA.onclick = setA;
+    els.setB.onclick = setB;
+    els.preview.onclick = previewClip;
+    els.cancelPreview.onclick = cancelPreview;
+    els.download.onclick = downloadClip;
+    els.chips.forEach(b => b.onclick = () => { els.vid.currentTime += Number(b.dataset.skip); });
 
-    paint();
+    els.vid.addEventListener('timeupdate', () => { els.tNow.textContent = fmt(els.vid.currentTime|0); });
+    els.vid.addEventListener('loadedmetadata', () => { els.tDur.textContent = fmt(els.vid.duration|0); });
+
+    // ---- boot from ?code=... if present ----
+    const qCode = getQP('code');
+    if (qCode) { els.code.value = qCode; loadVideo(); }
   </script>
 </body>
 </html>

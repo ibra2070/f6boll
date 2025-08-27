@@ -1,10 +1,5 @@
 {
-  "functions": {
-    "api/clip.js": {
-      "maxDuration": 300,
-      "memory": 1024,
-      "includeFiles": "node_modules/**"
-    }
-  }
+  "rewrites": [
+    { "source": "/api/clip", "destination": "https://f6boll.onrender.com/clip" }
+  ]
 }
-
