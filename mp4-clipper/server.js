@@ -1,4 +1,18 @@
- app.get('/clip', async (req, res) => {
+ import { spawn } from 'child_process';
+import express from 'express';
+
+const app = express();
+
+// --- Config from environment variables ---
+const BASE        = process.env.BASE;
+const PLAYLIST    = process.env.PLAYLIST || 'stream_0.m3u8';
+const MAX_SECONDS = Number(process.env.MAX_SECONDS || 30);
+const MAX_WIDTH   = Number(process.env.MAX_WIDTH || 720);
+const CRF         = process.env.CRF || '23';
+const PRESET      = process.env.PRESET || 'ultrafast';
+const FPS         = Number(process.env.FPS || 30);
+
+app.get('/clip', async (req, res) => {
   try {
     const code  = String(req.query.code || '').trim();
     const start = Number(req.query.start || 0);
@@ -14,6 +28,8 @@
     }
 
     const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
+    console.log('FFmpeg input URL:', m3u8Url); // 👈 Debug log
+
     const outfile = `clip_${code}_${Math.floor(start)}-${Math.floor(end)}.mp4`;
 
     // Video filter: cap width, keep AR, even dims, yuv420p
@@ -83,14 +99,20 @@
       ff.stdout.pipe(res);
     });
 
-    ff.stderr.on('data', d => { errLog += d.toString(); });
+    ff.stderr.on('data', d => { 
+      errLog += d.toString(); 
+    });
 
     ff.on('exit', (codeExit, signal) => {
       if (!hadData && !sentHeaders) {
-        const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
-        return res.status(500).type('text').end(msg);
+        // Return error to client
+        return res.status(500).type('text').end(
+          errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`
+        );
       }
       if (!res.writableEnded) res.end();
+
+      // Always log full error details to server logs
       if (codeExit !== 0 || signal) {
         console.error('ffmpeg exit', { codeExit, signal, err: errLog });
       }
@@ -98,8 +120,11 @@
 
     ff.on('error', (e) => {
       console.error('spawn error', e);
-      if (!sentHeaders) res.status(500).type('text').end('spawn error: ' + (e.message || e));
-      else try { res.end(); } catch {}
+      if (!sentHeaders) {
+        res.status(500).type('text').end('spawn error: ' + (e.message || e));
+      } else {
+        try { res.end(); } catch {}
+      }
     });
 
   } catch (e) {
@@ -107,3 +132,5 @@
     res.status(500).type('text').end('Server error: ' + (e.message || e));
   }
 });
+
+export default app;
