@@ -23,7 +23,7 @@ COPY mp4-clipper/package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
 # Copy the rest of the mp4-clipper source code
-COPY mp4-clipper/ .
+COPY . .
 
 # Render provides PORT, your code already reads process.env.PORT
 EXPOSE 8080
