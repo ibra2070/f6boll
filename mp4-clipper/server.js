@@ -7,7 +7,7 @@ const app = express();
 /* ───── Env (Render → Environment Variables) ─────
    REQUIRED:
      BASE        e.g. https://fision-videos-worker.myfisionupload.workers.dev
-   OPTIONAL (sane defaults provided):
+   OPTIONAL (defaults provided):
      PLAYLIST    default: stream_0.m3u8
      MAX_SECONDS default: 30
      MAX_WIDTH   default: 720
@@ -15,7 +15,7 @@ const app = express();
      PRESET      default: "ultrafast"
      FPS         default: 30
      UA          default: desktop Chrome UA
-     REFERER     default: ""  (set if your origin requires a referrer)
+     REFERER     default: ""
 -------------------------------------------------- */
 const BASE        = process.env.BASE;
 const PLAYLIST    = process.env.PLAYLIST || "stream_0.m3u8";
@@ -31,7 +31,7 @@ const REFERER     = process.env.REFERER || "";
 app.get("/health", (_req, res) => res.type("text").send("OK"));
 app.get("/", (_req, res) => res.type("text").send("Fision clipper is running."));
 
-// simple probe to see what the server can fetch with headers
+// quick probe to verify playlist reachability with our headers
 app.get("/probe", async (req, res) => {
   try {
     const code = String(req.query.code || "").trim();
@@ -56,7 +56,7 @@ app.get("/probe", async (req, res) => {
   }
 });
 
-// main clipping endpoint
+// main clip endpoint
 app.get("/clip", async (req, res) => {
   try {
     if (!BASE) return res.status(500).type("text").end("Server misconfigured: BASE is not set");
@@ -79,39 +79,47 @@ app.get("/clip", async (req, res) => {
 
     const outfile = `clip_${code}_${Math.floor(start)}-${Math.floor(end)}.mp4`;
 
-    // video filter: cap width, preserve AR, even dims, yuv420p
+    // Video filter: cap width, keep AR, even dims, yuv420p
     const vf = [
       `scale='min(${MAX_WIDTH},iw)':-2:force_original_aspect_ratio=decrease`,
       "pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2",
       "format=yuv420p",
     ].join(",");
 
-    // optional origin headers
+    // Optional headers (e.g., Referer) if the origin wants them
     const headerLines = [];
     if (REFERER) headerLines.push(`Referer: ${REFERER}`);
     const headersArg = headerLines.length ? ["-headers", headerLines.join("\r\n")] : [];
 
     // HLS-hardened args:
-    //  - pre-input -ss for fast network seek
-    //  - reconnect flags
-    //  - browser UA
+    //  • pre-input -ss for fast seek
+    //  • disable keep-alive, add reconnect
+    //  • browser UA
+    //  • fragmented MP4 to start emitting bytes immediately over pipe
     const args = [
       "-hide_banner","-loglevel","error","-nostdin",
       "-protocol_whitelist","file,crypto,https,tcp,tls",
       "-rw_timeout","15000000",
       "-user_agent", UA,
       "-allowed_extensions","ALL",
+      "-http_persistent","0",              // no keep-alive (helps some CDNs)
       "-reconnect","1",
       "-reconnect_streamed","1",
       "-reconnect_on_http_error","4xx,5xx",
       "-reconnect_delay_max","5",
       ...headersArg,
 
+      // fast seek: before input
       "-ss", String(start),
       "-i", m3u8Url,
+
+      // duration window
       "-t", String(duration),
 
+      // select streams
       "-map","0:v?","-map","0:a?",
+
+      // output shaping
       "-r", String(FPS),
       "-vf", vf,
 
@@ -129,21 +137,22 @@ app.get("/clip", async (req, res) => {
       "-b:a","128k",
       "-ac","2",
 
-      "-movflags","+faststart",
+      // Fragmented MP4 for piping over HTTP
+      "-movflags","+frag_keyframe+empty_moov",
       "-f","mp4",
       "pipe:1",
     ];
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore","pipe","pipe"] });
 
-    // kill ffmpeg if client disconnects
+    // Kill ffmpeg if client disconnects
     req.on("aborted", () => { try { ff.kill("SIGKILL"); } catch {} });
 
     let sentHeaders = false;
     let hadData = false;
     let errLog = "";
 
-    // watchdog: no first byte within 20s? bail and report stderr
+    // Watchdog: no first byte in 20s => kill and report stderr
     const FIRST_BYTE_DEADLINE_MS = 20000;
     const watchdog = setTimeout(() => {
       if (!hadData) {
