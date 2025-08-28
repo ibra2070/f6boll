@@ -15,14 +15,14 @@ RUN set -eux; \
   chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
   rm -rf ffmpeg-*-amd64-static
 
-# Set working directory inside container
+# Set working directory inside the container
 WORKDIR /app
 
-# Install dependencies first (using mp4-clipper/package.json + lockfile)
-COPY mp4-clipper/package*.json ./
+# Install dependencies first (use lockfile if present)
+COPY package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
-# Copy the rest of the mp4-clipper source code
+# Copy the rest of the app
 COPY . .
 
 # Render provides PORT, your code already reads process.env.PORT
