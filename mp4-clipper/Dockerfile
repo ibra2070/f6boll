@@ -26,4 +26,4 @@ COPY . .
 
 # Render provides PORT, your code already reads process.env.PORT
 EXPOSE 8080
-CMD ["node", "server.js"]
+CMD ["node", "mp4-clipper/server.js"]
