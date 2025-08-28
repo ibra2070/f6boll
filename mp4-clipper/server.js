@@ -60,43 +60,50 @@ app.get("/clip", async (req, res) => {
       "format=yuv420p",
     ].join(",");
 
-    const args = [
-      "-hide_banner", "-loglevel", "error", "-nostdin",
-      "-protocol_whitelist", "file,crypto,https,tcp,tls",
-      "-rw_timeout", "15000000",
-      "-user_agent", "FisionClipper/1.0",
+   const args = [
+  "-hide_banner","-loglevel","error","-nostdin",
+  "-protocol_whitelist","file,crypto,https,tcp,tls",
+  "-rw_timeout","15000000",
+  "-user_agent","FisionClipper/1.0",
 
-      // trim first → faster
-      "-ss", String(start),
-      "-t",  String(duration),
+  // more robust HLS networking
+  "-reconnect","1",
+  "-reconnect_streamed","1",
+  "-reconnect_at_eof","1",
+  "-allowed_extensions","ALL",
 
-      // input
-      "-i", m3u8Url,
+  // input URL FIRST for HLS
+  "-i", m3u8Url,
 
-      // choose streams
-      "-map", "0:v?", "-map", "0:a?",
+  // then trim (demuxer-level seek; safer for HLS)
+  "-ss", String(start),
+  "-t",  String(duration),
 
-      // output shaping
-      "-r", String(FPS),
-      "-vf", vf,
+  // select streams
+  "-map","0:v?","-map","0:a?",
 
-      // encoders
-      "-c:v", "libx264",
-      "-preset", PRESET,
-      "-crf", CRF,
-      "-profile:v", "high",
-      "-level", "4.1",
-      "-pix_fmt", "yuv420p",
-      "-threads", "1",
+  // output shaping
+  "-r", String(FPS),
+  "-vf", vf,
 
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-ac", "2",
+  // encoders
+  "-c:v","libx264",
+  "-preset", PRESET,
+  "-crf", CRF,
+  "-profile:v","high",
+  "-level","4.1",
+  "-pix_fmt","yuv420p",
+  "-threads","1",
 
-      "-movflags", "+faststart",
-      "-f", "mp4",
-      "pipe:1",
-    ];
+  "-c:a","aac",
+  "-b:a","128k",
+  "-ac","2",
+
+  "-movflags","+faststart",
+  "-f","mp4",
+  "pipe:1",
+];
+
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
 
