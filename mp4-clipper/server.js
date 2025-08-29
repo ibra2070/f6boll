@@ -1,27 +1,32 @@
 // server.js (ESM)
 import express from "express";
 import { spawn } from "child_process";
+import os from "os";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 
-/* ─ Env (Render → Environment Variables) ─
+/* Env (Render → Environment Variables)
    BASE        required (e.g. https://fision-videos-worker.myfisionupload.workers.dev)
-   PLAYLIST    optional, default: stream_0.m3u8
-   UA          optional, default: desktop Chrome UA
-   REFERER     optional, set if your origin requires it
-   TIMEOUT_MS  optional, default: 20000 (watchdog for first byte)
+   PLAYLIST    optional (default: stream_0.m3u8)
+   UA          optional (default: desktop Chrome UA used for origin fetch)
+   REFERER     optional (set if origin requires it)
+   TIMEOUT_MS  optional (default: 20000) — watchdog for first byte
+   SOLID_MP4   optional (default: "") — set "1" to always write solid MP4 to temp and then send
 */
 const BASE        = process.env.BASE;
 const PLAYLIST    = process.env.PLAYLIST || "stream_0.m3u8";
 const UA          = process.env.UA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const REFERER     = process.env.REFERER || "";
 const TIMEOUT_MS  = Number(process.env.TIMEOUT_MS || 20000);
+const FORCE_SOLID = process.env.SOLID_MP4 === "1";
 
 // health & root
 app.get("/health", (_req, res) => res.type("text").send("OK"));
 app.get("/", (_req, res) => res.type("text").send("Fision clipper is running."));
 
-// small helper: probe playlist reachability
+// probe helper
 app.get("/probe", async (req, res) => {
   try {
     const code = String(req.query.code || "").trim();
@@ -35,7 +40,7 @@ app.get("/probe", async (req, res) => {
   }
 });
 
-/* Parse VOD playlist and return cumulative boundaries: [0, t1, t2, ... total] */
+/* Parse VOD playlist to cumulative boundaries [0, t1, t2, ... total] */
 function parseBoundaries(m3u8Text) {
   const lines = m3u8Text.split(/\r?\n/);
   const b = [0];
@@ -85,20 +90,18 @@ app.get("/clip", async (req, res) => {
     const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
     console.log("FFmpeg input URL:", m3u8Url);
 
-    // fetch the playlist to get real segment boundaries
-    const r = await fetch(m3u8Url, {
-      headers: { "user-agent": UA, ...(REFERER ? { referer: REFERER } : {}) },
-    });
+    // fetch playlist to compute segment boundaries
+    const r = await fetch(m3u8Url, { headers: { "user-agent": UA, ...(REFERER ? { referer: REFERER } : {}) } });
     if (!r.ok) return res.status(502).type("text").end(`Failed to fetch playlist: HTTP ${r.status}`);
-    const text = await r.text();
-    const boundaries = parseBoundaries(text);
+    const playlistText = await r.text();
+    const boundaries = parseBoundaries(playlistText);
     const total = boundaries[boundaries.length - 1] || 0;
 
-    // clamp requested times to valid range
+    // clamp requested times
     const sReq = Math.max(0, Math.min(start, Math.max(0, total - 0.001)));
     const eReq = Math.max(0, Math.min(end, total));
 
-    // snap to segment boundaries (inclusive)
+    // snap to whole segments
     const sSnap = floorBoundary(boundaries, sReq);
     let eSnap  = ceilBoundary(boundaries, eReq);
     if (eSnap <= sSnap) {
@@ -106,17 +109,23 @@ app.get("/clip", async (req, res) => {
       const idx = boundaries.indexOf(sSnap);
       eSnap = boundaries[Math.min(idx + 1, boundaries.length - 1)];
     }
-
     const dur = +(eSnap - sSnap).toFixed(3);
+
     const filename = `clip_${code}_${Math.floor(sReq)}-${Math.floor(eReq)}.mp4`;
+
+    // Decide container mode:
+    // - iOS (iPhone/iPad) or FORCE_SOLID or ?solid=1 → solid MP4 (write to temp, +faststart)
+    // - otherwise → fragmented MP4 over pipe (faster start in browsers)
+    const ua = String(req.headers["user-agent"] || "");
+    const isIOS = /iPhone|iPad|iPod/i.test(ua);
+    const wantSolid = FORCE_SOLID || isIOS || String(req.query.solid || "") === "1";
 
     // Optional headers for origin
     const headerLines = [];
     if (REFERER) headerLines.push(`Referer: ${REFERER}`);
     const headersArg = headerLines.length ? ["-headers", headerLines.join("\r\n")] : [];
 
-    // Stream-copy, keyframe-aligned (fast)
-    const args = [
+    const baseArgs = [
       "-hide_banner","-loglevel","error","-nostdin",
       "-protocol_whitelist","file,crypto,https,tcp,tls",
       "-rw_timeout","15000000",
@@ -129,52 +138,66 @@ app.get("/clip", async (req, res) => {
       "-reconnect_delay_max","5",
       ...headersArg,
 
-      // fast seek to snapped start
       "-ss", String(sSnap),
       "-i", m3u8Url,
-
-      // duration = full segments until snapped end
       "-t", String(dur),
 
       "-map","0:v?","-map","0:a?",
       "-c:v","copy",
       "-c:a","copy",
       "-bsf:a","aac_adtstoasc",
-      "-movflags","+frag_keyframe+empty_moov+faststart",
-      "-f","mp4",
-      "pipe:1",
     ];
+
+    let args, outputTarget;
+    if (wantSolid) {
+      // Solid MP4: write to temp file with +faststart, then send file
+      const tmp = path.join(os.tmpdir(), `${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
+      args = [...baseArgs, "-movflags","+faststart", "-f","mp4", tmp];
+      outputTarget = tmp;
+    } else {
+      // Fragmented MP4 over pipe (good for browsers, but not Photos app)
+      args = [...baseArgs, "-movflags","+frag_keyframe+empty_moov+faststart", "-f","mp4", "pipe:1"];
+      outputTarget = "pipe:1";
+    }
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore","pipe","pipe"] });
 
-    // abort if client disconnects
+    // Kill ffmpeg if client disconnects
     req.on("aborted", () => { try { ff.kill("SIGKILL"); } catch {} });
 
     let sentHeaders = false;
     let hadData = false;
     let errLog = "";
 
-    // watchdog: bail if no first byte within TIMEOUT_MS
-    const watchdog = setTimeout(() => {
+    // watchdog for first byte when piping
+    const watchdog = !wantSolid ? setTimeout(() => {
       if (!hadData) {
         console.warn("watchdog: no data within timeout, killing ffmpeg");
         try { ff.kill("SIGKILL"); } catch {}
       }
-    }, TIMEOUT_MS);
+    }, TIMEOUT_MS) : null;
 
-    ff.stdout.once("data", (chunk) => {
-      hadData = true;
-      clearTimeout(watchdog);
-      if (!sentHeaders) {
-        sentHeaders = true;
-        res.status(200);
-        res.setHeader("Content-Type", "video/mp4");
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      }
-      res.write(chunk);
-      ff.stdout.pipe(res);
-    });
+    if (!wantSolid) {
+      // stream out immediately (fragmented MP4)
+      ff.stdout.once("data", (chunk) => {
+        hadData = true;
+        if (watchdog) clearTimeout(watchdog);
+        if (!sentHeaders) {
+          sentHeaders = true;
+          res.status(200);
+          res.setHeader("Content-Type", "video/mp4");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+          // optional: reveal snapped window
+          res.setHeader("X-Clip-Requested-Start", String(sReq.toFixed(3)));
+          res.setHeader("X-Clip-Requested-End",   String(eReq.toFixed(3)));
+          res.setHeader("X-Clip-Snapped-Start",   String(sSnap.toFixed(3)));
+          res.setHeader("X-Clip-Snapped-End",     String(eSnap.toFixed(3)));
+        }
+        res.write(chunk);
+        ff.stdout.pipe(res);
+      });
+    }
 
     ff.stderr.on("data", (d) => {
       const s = d.toString();
@@ -182,20 +205,52 @@ app.get("/clip", async (req, res) => {
       console.error("[ffmpeg]", s.trim());
     });
 
-    ff.on("exit", (codeExit, signal) => {
-      clearTimeout(watchdog);
-      if (!hadData && !sentHeaders) {
+    ff.on("exit", async (codeExit, signal) => {
+      if (watchdog) clearTimeout(watchdog);
+
+      if (wantSolid) {
+        // send the finished solid MP4 file
+        if (codeExit === 0 && !signal) {
+          try {
+            const st = await fs.promises.stat(outputTarget);
+            res.status(200);
+            res.setHeader("Content-Type", "video/mp4");
+            res.setHeader("Cache-Control", "no-store");
+            res.setHeader("Content-Length", String(st.size));
+            res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+            res.setHeader("X-Clip-Requested-Start", String(sReq.toFixed(3)));
+            res.setHeader("X-Clip-Requested-End",   String(eReq.toFixed(3)));
+            res.setHeader("X-Clip-Snapped-Start",   String(sSnap.toFixed(3)));
+            res.setHeader("X-Clip-Snapped-End",     String(eSnap.toFixed(3)));
+
+            const read = fs.createReadStream(outputTarget);
+            read.pipe(res);
+            read.on("close", async () => {
+              try { await fs.promises.unlink(outputTarget); } catch {}
+            });
+            return;
+          } catch (e) {
+            console.error("send solid file error", e);
+          }
+        }
+        // failed before writing file
         const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
         return res.status(500).type("text").end(msg);
-      }
-      if (!res.writableEnded) res.end();
-      if (codeExit !== 0 || signal) {
-        console.error("ffmpeg exit", { codeExit, signal, err: errLog });
+      } else {
+        // piping mode
+        if (!hadData && !sentHeaders) {
+          const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
+          return res.status(500).type("text").end(msg);
+        }
+        if (!res.writableEnded) res.end();
+        if (codeExit !== 0 || signal) {
+          console.error("ffmpeg exit", { codeExit, signal, err: errLog });
+        }
       }
     });
 
     ff.on("error", (e) => {
-      clearTimeout(watchdog);
+      if (watchdog) clearTimeout(watchdog);
       console.error("spawn error", e);
       if (!sentHeaders) res.status(500).type("text").end("spawn error: " + (e.message || e));
       else try { res.end(); } catch {}
