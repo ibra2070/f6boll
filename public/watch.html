@@ -38,6 +38,16 @@
     .ctext{ flex:1; word-break:break-word }
     .ctime{ color:#b8ffde; font-weight:700 }
     .comment-form{ display:flex; gap:8px; align-items:center; margin:10px 0 2px }
+
+    /* iPhone overflow fix for the comment row */
+    .comment-form{ flex-wrap:wrap; }                                    /* allow wrapping */
+    .comment-form input[type="text"]{ flex:1 1 240px; min-width:0; }    /* allow shrink on iOS */
+    .comment-form input[type="number"]{ flex:0 0 90px; width:90px; }
+    #useCurrent,#addCommentBtn{ flex:0 0 auto; white-space:nowrap; }
+    @media (max-width: 480px){
+      #useCurrent,#addCommentBtn{ flex:1 1 calc(50% - 4px); }
+    }
+
     .comment-tip{ font-size:12px; color:var(--muted); margin-bottom:8px }
 
     /* download progress UI */
@@ -76,7 +86,7 @@
       <h3>Comments</h3>
       <div class="comment-form">
         <input id="commentText" type="text" placeholder="Add a comment…" />
-        <input id="commentSec" type="number" min="0" value="0" style="width:110px" />
+        <input id="commentSec" type="number" min="0" step="1" value="0" />
         <button id="useCurrent">Use current</button>
         <button id="addCommentBtn">Add</button>
       </div>
@@ -165,10 +175,9 @@
     const getQP = k => new URLSearchParams(location.search).get(k);
     const bytes = n => {
       if (!Number.isFinite(n) || n <= 0) return '0 B';
-      const units = ['B','KB','MB','GB','TB'];
-      let i = 0, v = n;
-      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-      return v.toFixed(v < 10 && i > 0 ? 1 : 0) + ' ' + units[i];
+      const u = ['B','KB','MB','GB','TB']; let i=0, v=n;
+      while (v >= 1024 && i < u.length - 1) { v/=1024; i++; }
+      return v.toFixed(v < 10 && i>0 ? 1 : 0) + ' ' + u[i];
     };
 
     // ---- load video (HLS) ----
@@ -210,9 +219,7 @@
 
     // ---- preview ----
     async function previewClip() {
-      if (!Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
-        return alert('Set valid A and B first.');
-      }
+      if (!Number.isFinite(A) || !Number.isFinite(B) || B <= A) return alert('Set valid A and B first.');
       if (previewTimer) { cancelPreview(); }
       prevTime = els.vid.currentTime;
       els.vid.currentTime = A;
@@ -229,7 +236,6 @@
 
     // ---- COMMENTS ----
     function renderComments(items=[]) {
-      // sort by video time ascending
       items.sort((a,b)=> (a.time||0) - (b.time||0));
       els.commentList.innerHTML = '';
       for (const it of items) {
@@ -284,7 +290,6 @@
     // update default comment time as video plays
     els.vid.addEventListener('timeupdate', () => {
       els.tNow.textContent = fmt(els.vid.currentTime|0);
-      // only update the time input if user hasn't focused it (so we don't fight typing)
       if (document.activeElement !== els.commentSec) {
         els.commentSec.value = Math.floor(els.vid.currentTime) || 0;
       }
@@ -408,10 +413,7 @@
             } catch {}
           }
 
-          const a = Object.assign(document.createElement('a'), {
-            href: URL.createObjectURL(blob),
-            download: name
-          });
+          const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
           document.body.appendChild(a); a.click();
           setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 
@@ -423,9 +425,7 @@
           setStatus('Downloading…');
           const blob = await res.blob();
           const name = `clip_${code}_${A}-${B}.mp4`;
-          const a = Object.assign(document.createElement('a'), {
-            href: URL.createObjectURL(blob), download: name
-          });
+          const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
           document.body.appendChild(a); a.click();
           setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 
