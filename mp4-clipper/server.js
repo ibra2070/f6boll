@@ -7,6 +7,7 @@ import path from "path";
 import crypto from "crypto";
 
 const app = express();
+app.use(express.json()); // <-- NEW: parse JSON bodies
 
 /* Env (Render → Environment Variables)
    BASE        required (e.g. https://fision-videos-worker.myfisionupload.workers.dev)
@@ -24,9 +25,18 @@ const TIMEOUT_MS  = Number(process.env.TIMEOUT_MS || 20000);
 const FORCE_SOLID = process.env.SOLID_MP4 === "1";
 
 /* -------------------------- Progress tracking store ------------------------- */
-const jobs = new Map();             // jobId -> job state
-const sseClients = new Map();       // jobId -> Set(res)
+const jobs = new Map();      // jobId -> job state
+const sseClients = new Map();// jobId -> Set(res)
 
+/* -------------------------- Comments store (in-memory) ---------------------- */
+const comments = new Map();  // code -> [{id,time,text,createdAt}]
+function getComments(code) {
+  const list = comments.get(code) || [];
+  // ensure numeric time and sort by time asc
+  return list.slice().sort((a,b) => (a.time||0) - (b.time||0));
+}
+
+/* utils */
 function makeJobId() {
   return crypto.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2,10));
 }
@@ -37,8 +47,8 @@ function initJob(jobId, seed) {
     error: "",
     requested: { start: 0, end: 0 },
     snapped: { start: 0, end: 0, duration: 0 },
-    progress: { timeMs: 0, pct: 0 },      // ffmpeg processing progress (0-100)
-    transfer: { bytes: 0, totalBytes: null }, // HTTP bytes to client
+    progress: { timeMs: 0, pct: 0 },
+    transfer: { bytes: 0, totalBytes: null },
     updatedAt: Date.now(),
     ...seed,
   };
@@ -49,7 +59,6 @@ function initJob(jobId, seed) {
 function patchJob(jobId, patch) {
   const cur = jobs.get(jobId) || {};
   const job = { ...cur, ...patch, updatedAt: Date.now() };
-  // deep merge a couple of known sub-objects
   if (patch?.requested) job.requested = { ...cur.requested, ...patch.requested };
   if (patch?.snapped)   job.snapped   = { ...cur.snapped,   ...patch.snapped   };
   if (patch?.progress)  job.progress  = { ...cur.progress,  ...patch.progress  };
@@ -76,7 +85,7 @@ function pushSSE(jobId) {
 app.get("/health", (_req, res) => res.type("text").send("OK"));
 app.get("/", (_req, res) => res.type("text").send("Fision clipper is running."));
 
-/* Probe helper (unchanged) */
+/* Probe helper */
 app.get("/probe", async (req, res) => {
   try {
     const code = String(req.query.code || "").trim();
@@ -90,7 +99,7 @@ app.get("/probe", async (req, res) => {
   }
 });
 
-/* -------------------- Playlist boundary helpers (unchanged) ------------------ */
+/* -------------------- Playlist boundary helpers ----------------------------- */
 function parseBoundaries(m3u8Text) {
   const lines = m3u8Text.split(/\r?\n/);
   const b = [0];
@@ -109,13 +118,11 @@ function floorBoundary(b, t) { let lo = 0, hi = b.length - 1; while (lo < hi) { 
 function ceilBoundary(b, t)  { let lo = 0, hi = b.length - 1; while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if (b[mid] >= t) hi = mid; else lo = mid + 1; } return b[lo]; }
 
 /* ----------------------------- Progress APIs -------------------------------- */
-// JSON polling
 app.get("/progress/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "job not found" });
   res.json(job);
 });
-// SSE (live)
 app.get("/progress-stream/:jobId", (req, res) => {
   const { jobId } = req.params;
   res.set({
@@ -129,7 +136,6 @@ app.get("/progress-stream/:jobId", (req, res) => {
   if (!sseClients.has(jobId)) sseClients.set(jobId, new Set());
   sseClients.get(jobId).add(res);
 
-  // send snapshot immediately
   res.write(`data: ${JSON.stringify(jobs.get(jobId) || { id: jobId, status: "unknown" })}\n\n`);
 
   req.on("close", () => {
@@ -138,14 +144,37 @@ app.get("/progress-stream/:jobId", (req, res) => {
   });
 });
 
+/* ----------------------------- Comments APIs -------------------------------- */
+// GET /comments?code=abc   -> { comments: [{id,time,text,createdAt}] }
+app.get("/comments", (req, res) => {
+  const code = String(req.query.code || "").trim();
+  if (!code) return res.status(400).json({ error: "code is required" });
+  return res.json({ comments: getComments(code) });
+});
+
+// POST /comments  { code, time, text }
+app.post("/comments", (req, res) => {
+  const code = String(req.body?.code || "").trim();
+  const time = Number(req.body?.time);
+  const text = String(req.body?.text || "").trim();
+  if (!code) return res.status(400).json({ error: "code is required" });
+  if (!Number.isFinite(time) || time < 0) return res.status(400).json({ error: "invalid time" });
+  if (!text || text.length > 500) return res.status(400).json({ error: "text required (<=500 chars)" });
+
+  const item = { id: crypto.randomUUID?.() || (Date.now()+"_"+Math.random().toString(16).slice(2)), time: Math.floor(time), text, createdAt: Date.now() };
+  const list = comments.get(code) || [];
+  list.push(item);
+  comments.set(code, list);
+  return res.json({ ok: true, comment: item });
+});
+
 /* -------------------------------- /clip ------------------------------------- */
 app.get("/clip", async (req, res) => {
   try {
     if (!BASE) return res.status(500).type("text").end("Server misconfigured: BASE is not set");
 
-    // NEW: job id for progress (client can pass ?job=...; otherwise generate one)
     const jobId = String(req.query.job || makeJobId());
-    res.setHeader("X-Job-Id", jobId); // header becomes visible once response starts
+    res.setHeader("X-Job-Id", jobId);
 
     const code  = String(req.query.code || "").trim();
     const start = Number(req.query.start || 0);
@@ -158,7 +187,6 @@ app.get("/clip", async (req, res) => {
     const m3u8Url = `${BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
     console.log("FFmpeg input URL:", m3u8Url);
 
-    // fetch playlist to compute segment boundaries
     const r = await fetch(m3u8Url, { headers: { "user-agent": UA, ...(REFERER ? { referer: REFERER } : {}) } });
     if (!r.ok) {
       initJob(jobId, { status: "error", error: `Failed to fetch playlist: HTTP ${r.status}` });
@@ -168,11 +196,9 @@ app.get("/clip", async (req, res) => {
     const boundaries = parseBoundaries(playlistText);
     const total = boundaries[boundaries.length - 1] || 0;
 
-    // clamp requested times
     const sReq = Math.max(0, Math.min(start, Math.max(0, total - 0.001)));
     const eReq = Math.max(0, Math.min(end, total));
 
-    // snap to whole segments
     const sSnap = floorBoundary(boundaries, sReq);
     let eSnap  = ceilBoundary(boundaries, eReq);
     if (eSnap <= sSnap) {
@@ -182,7 +208,6 @@ app.get("/clip", async (req, res) => {
     const dur = +(eSnap - sSnap).toFixed(3);
     const filename = `clip_${code}_${Math.floor(sReq)}-${Math.floor(eReq)}.mp4`;
 
-    // Initialize job state
     initJob(jobId, {
       status: "running",
       requested: { start: +sReq.toFixed(3), end: +eReq.toFixed(3) },
@@ -191,17 +216,14 @@ app.get("/clip", async (req, res) => {
       transfer:  { bytes: 0, totalBytes: null }
     });
 
-    // Decide container mode
     const ua = String(req.headers["user-agent"] || "");
     const isIOS = /iPhone|iPad|iPod/i.test(ua);
     const wantSolid = FORCE_SOLID || isIOS || String(req.query.solid || "") === "1";
 
-    // Optional headers for origin
     const headerLines = [];
     if (REFERER) headerLines.push(`Referer: ${REFERER}`);
     const headersArg = headerLines.length ? ["-headers", headerLines.join("\r\n")] : [];
 
-    // FFmpeg args
     const baseArgs = [
       "-hide_banner","-loglevel","error","-nostdin",
       "-protocol_whitelist","file,crypto,https,tcp,tls",
@@ -224,7 +246,6 @@ app.get("/clip", async (req, res) => {
       "-c:a","copy",
       "-bsf:a","aac_adtstoasc",
 
-      // NEW: structured progress to stderr so we can compute % before first byte
       "-progress","pipe:2",
       "-stats_period","0.5",
     ];
@@ -241,7 +262,6 @@ app.get("/clip", async (req, res) => {
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore","pipe","pipe"] });
 
-    // Cancel if client disconnects
     req.on("aborted", () => {
       try { ff.kill("SIGKILL"); } catch {}
       endJob(jobId, "canceled");
@@ -250,9 +270,7 @@ app.get("/clip", async (req, res) => {
     let sentHeaders = false;
     let hadData = false;
     let errLog = "";
-    let progBuf = ""; // buffer for parsing -progress lines
-
-    // watchdog for first byte when piping
+    let progBuf = "";
     const watchdog = !wantSolid ? setTimeout(() => {
       if (!hadData) {
         console.warn("watchdog: no data within timeout, killing ffmpeg");
@@ -260,9 +278,7 @@ app.get("/clip", async (req, res) => {
       }
     }, TIMEOUT_MS) : null;
 
-    // STREAMING mode: write to client immediately
     if (!wantSolid) {
-      // Count bytes for transfer progress
       ff.stdout.on("data", (chunk) => {
         patchJob(jobId, { transfer: { bytes: (jobs.get(jobId)?.transfer?.bytes || 0) + chunk.length } });
       });
@@ -287,12 +303,10 @@ app.get("/clip", async (req, res) => {
       });
     }
 
-    // Parse ffmpeg progress & error logs from stderr
     ff.stderr.on("data", (d) => {
       const s = d.toString();
       errLog += s;
 
-      // Parse -progress key=value lines
       progBuf += s;
       let idx;
       while ((idx = progBuf.indexOf("\n")) >= 0) {
@@ -306,12 +320,10 @@ app.get("/clip", async (req, res) => {
             const pct = Math.max(0, Math.min(99, Math.round((ms / (dur * 1000)) * 100)));
             patchJob(jobId, { progress: { timeMs: ms, pct } });
           } else if (key === "progress" && val === "end") {
-            // ffmpeg reports processing done (transfer may continue for solid mode)
             patchJob(jobId, { progress: { ...(jobs.get(jobId)?.progress||{}), pct: 100 } });
           }
         }
       }
-      // Also log concise error lines to console
       if (s.trim()) console.error("[ffmpeg]", s.trim());
     });
 
@@ -319,7 +331,6 @@ app.get("/clip", async (req, res) => {
       if (watchdog) clearTimeout(watchdog);
 
       if (wantSolid) {
-        // send the finished solid MP4 file
         if (codeExit === 0 && !signal) {
           try {
             const st = await fs.promises.stat(outputTarget);
@@ -354,7 +365,6 @@ app.get("/clip", async (req, res) => {
         endJob(jobId, "error", msg);
         return res.status(500).type("text").end(msg);
       } else {
-        // piping mode
         if (!hadData && !sentHeaders) {
           const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
           endJob(jobId, "error", msg);

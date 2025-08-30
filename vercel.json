@@ -3,6 +3,7 @@
     { "source": "/api/clip", "destination": "https://f6boll.onrender.com/clip" },
     { "source": "/api/progress/:id", "destination": "https://f6boll.onrender.com/progress/:id" },
     { "source": "/api/progress-stream/:id", "destination": "https://f6boll.onrender.com/progress-stream/:id" },
-    { "source": "/api/probe", "destination": "https://f6boll.onrender.com/probe" }
+    { "source": "/api/probe", "destination": "https://f6boll.onrender.com/probe" },
+    { "source": "/api/comments", "destination": "https://f6boll.onrender.com/comments" }
   ]
 }
