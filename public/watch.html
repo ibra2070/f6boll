@@ -17,10 +17,8 @@
       border-radius:16px; padding:16px; box-shadow:0 0 20px rgba(0,255,0,.25); }
     .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center }
     input[type=text]{ flex:1; min-width:180px; padding:10px 12px; border-radius:10px; border:none; }
-    button{
-      padding:10px 14px; border:none; border-radius:10px; background:var(--green); color:#000;
-      font-weight:600; cursor:pointer; transition:filter .15s;
-    }
+    button{ padding:10px 14px; border:none; border-radius:10px; background:var(--green); color:#000;
+      font-weight:600; cursor:pointer; transition:filter .15s; }
     button.secondary{ background:#202225; color:#fff; border:1px solid #2a2d33 }
     button:disabled{ opacity:.5; cursor:not-allowed }
     button:hover{ filter:brightness(.95) }
@@ -29,9 +27,14 @@
     .muted{ color:var(--muted) }
     .spacer{ flex:1 }
     .tag{ padding:2px 8px; border-radius:999px; background:#1b1d21; font-size:12px }
-    .status{ margin-top:10px; min-height:20px }
-    .bar{ height:6px; background:#1b1d21; border-radius:999px; overflow:hidden; margin-top:6px; display:none; }
-    .bar > div{ height:100%; width:0%; background:var(--green); }
+
+    /* --- download progress UI --- */
+    .progress-wrap{margin-top:12px;display:flex;align-items:center;gap:10px}
+    .progress{flex:1;height:10px;background:#1b1d21;border-radius:999px;overflow:hidden}
+    .progress .bar{height:100%;width:0%;background:var(--green);transition:width .2s}
+    .progress .bar.indeterminate{width:30%;position:relative;animation:indet 1s linear infinite}
+    @keyframes indet{0%{margin-left:-30%}100%{margin-left:100%}}
+    .small-muted{color:var(--muted);font-size:13px}
   </style>
 </head>
 <body>
@@ -75,93 +78,104 @@
       <button data-skip="120">+120s</button>
     </div>
 
-    <!-- status -->
-    <div class="status" id="status">Idle</div>
-    <div class="bar" id="bar"><div></div></div>
+    <!-- download progress -->
+    <div class="progress-wrap" id="dlWrap" style="display:none">
+      <div class="progress">
+        <div class="bar" id="dlBar"></div>
+      </div>
+      <div class="small-muted" id="dlLabel">Preparing…</div>
+      <button class="secondary" id="cancelDl">Cancel</button>
+    </div>
 
     <div class="muted" style="margin-top:10px">
-      Tip: set A/B then Preview. Download creates an MP4 clip (H.264/AAC, faststart). iPhone is auto-optimized.
+      Tip: set A/B then Preview. Download creates an MP4 clip (H.264/AAC, faststart) that’s friendly for Instagram/TikTok.
     </div>
   </div>
 
   <!-- hls.js for non-Safari browsers -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
   <script>
-    // ===== CONFIG =====
-    // If you proxy through Vercel: keep API_BASE = ""
-    // If you want to call Render directly: set API_BASE = "https://f6boll.onrender.com"
-    const API_BASE = "https://f6boll.onrender.com"; // "" -> same origin (/api/*). Or "https://f6boll.onrender.com"
-    const HLS_BASE = "https://fision-videos-worker.myfisionupload.workers.dev";
-    const PLAYLIST = "stream_0.m3u8";
-    // ==================
-
-    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-    const $ = (id) => document.getElementById(id);
-
     // ---- elements ----
     const els = {
-      code: $("code"),
-      load: $("loadBtn"),
-      vid: $("vid"),
-      tNow: $("tNow"),
-      tDur: $("tDur"),
-      setA: $("setA"),
-      setB: $("setB"),
-      valA: $("valA"),
-      valB: $("valB"),
-      preview: $("previewBtn"),
-      cancelPreview: $("cancelPreviewBtn"),
-      download: $("downloadBtn"),
-      chips: document.querySelectorAll(".chips button"),
-      status: $("status"),
-      bar: $("bar"),
-      barIn: $("bar").firstElementChild
+      code: document.getElementById('code'),
+      load: document.getElementById('loadBtn'),
+      vid: document.getElementById('vid'),
+      tNow: document.getElementById('tNow'),
+      tDur: document.getElementById('tDur'),
+      setA: document.getElementById('setA'),
+      setB: document.getElementById('setB'),
+      valA: document.getElementById('valA'),
+      valB: document.getElementById('valB'),
+      preview: document.getElementById('previewBtn'),
+      cancelPreview: document.getElementById('cancelPreviewBtn'),
+      download: document.getElementById('downloadBtn'),
+      chips: document.querySelectorAll('.chips button'),
+      // progress UI
+      dlWrap: document.getElementById('dlWrap'),
+      dlBar: document.getElementById('dlBar'),
+      dlLabel: document.getElementById('dlLabel'),
+      cancelDl: document.getElementById('cancelDl'),
     };
 
     // ---- state ----
     let A = null, B = null;
     let hls = null;
     let previewTimer = null, prevTime = 0;
+    let dlController = null;
 
     // ---- utils ----
     const fmt = s => {
       s = Math.max(0, s|0);
       const m = (s/60)|0, ss = s%60;
-      return m + ":" + String(ss).padStart(2,"0");
+      return m + ':' + String(ss).padStart(2,'0');
     };
-    const qp = (k) => new URLSearchParams(location.search).get(k);
+    const getQP = k => new URLSearchParams(location.search).get(k);
+    const bytes = n => {
+      if (!Number.isFinite(n) || n <= 0) return '0 B';
+      const units = ['B','KB','MB','GB','TB'];
+      let i = 0, v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return v.toFixed(v < 10 && i > 0 ? 1 : 0) + ' ' + units[i];
+    };
 
     // ---- load video (HLS) ----
+    const HLS_BASE = 'https://fision-videos-worker.myfisionupload.workers.dev';
+    const PLAYLIST = 'stream_0.m3u8';
+
     async function loadVideo() {
-      const code = (els.code.value || "").trim();
-      if (!code) return alert("Enter a game code");
+      const code = (els.code.value || '').trim();
+      if (!code) return alert('Enter a game code');
+
       const src = `${HLS_BASE}/videos/${encodeURIComponent(code)}/${PLAYLIST}`;
 
-      // destroy old instance
+      // destroy old instance if any
       if (hls) { hls.destroy(); hls = null; }
-      els.vid.pause(); els.vid.removeAttribute("src"); els.vid.load();
+      els.vid.pause();
+      els.vid.removeAttribute('src');
+      els.vid.load();
 
       if (window.Hls && Hls.isSupported()) {
         hls = new Hls({ enableWorker: true });
         hls.loadSource(src);
         hls.attachMedia(els.vid);
-      } else if (els.vid.canPlayType("application/vnd.apple.mpegurl")) {
+      } else if (els.vid.canPlayType('application/vnd.apple.mpegurl')) {
         els.vid.src = src; // Safari
       } else {
-        alert("HLS is not supported in this browser.");
+        alert('HLS is not supported in this browser.');
+        return;
       }
     }
 
     // ---- A/B ----
-    function setA(){ A = Math.floor(els.vid.currentTime); els.valA.textContent = fmt(A); }
-    function setB(){ B = Math.floor(els.vid.currentTime); els.valB.textContent = fmt(B); }
+    function setA() { A = Math.floor(els.vid.currentTime); els.valA.textContent = fmt(A); }
+    function setB() { B = Math.floor(els.vid.currentTime); els.valB.textContent = fmt(B); }
 
     // ---- preview ----
     async function previewClip() {
       if (!Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
-        return alert("Set valid A and B first.");
+        return alert('Set valid A and B first.');
       }
-      if (previewTimer) cancelPreview();
+      if (previewTimer) { cancelPreview(); }
       prevTime = els.vid.currentTime;
       els.vid.currentTime = A;
       try { await els.vid.play(); } catch {}
@@ -175,93 +189,196 @@
       els.preview.disabled = false;
     }
 
-    // ---- download with SSE "preparing..." ----
-    function downloadClip() {
-      const code = (els.code.value || "").trim();
-      if (!code || !Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
-        return alert("Enter code and set valid A/B times.");
-      }
-
-      // Prepare status UI
-      els.status.textContent = "Preparing clip… 0%";
-      els.bar.style.display = "block";
-      els.barIn.style.width = "0%";
+    // ---- progress helpers ----
+    function showProgress() {
+      els.dlWrap.style.display = '';
+      els.dlBar.classList.remove('indeterminate');
+      els.dlBar.style.width = '0%';
+      els.dlLabel.textContent = 'Preparing…';
+      els.cancelDl.disabled = false;
       els.download.disabled = true;
+    }
+    function hideProgress() {
+      els.dlWrap.style.display = 'none';
+      els.download.disabled = false;
+    }
+    function setProgress(received, total) {
+      if (total > 0) {
+        const pct = Math.max(0, Math.min(100, Math.round((received / total) * 100)));
+        els.dlBar.classList.remove('indeterminate');
+        els.dlBar.style.width = `${pct}%`;
+        els.dlLabel.textContent = `${pct}% — ${bytes(received)} of ${bytes(total)}`;
+      } else {
+        // Unknown total size: indeterminate
+        els.dlBar.classList.add('indeterminate');
+        els.dlLabel.textContent = `Downloading… ${bytes(received)}`;
+      }
+    }
+    function setStatus(msg) { els.dlLabel.textContent = msg; }
 
-      // A progress id and an early-opened window (bypasses popup blockers)
-      const pid = Math.random().toString(36).slice(2);
-      const dlWin = window.open("about:blank", "_blank");
+    // ---- server progress polling ----
+    function pollServerProgress(jobId, isDownloading, intervalMs = 500) {
+      let stopped = false;
+      const id = setInterval(async () => {
+        if (stopped) return clearInterval(id);
+        try {
+          // NOTE: ensure Vercel rewrites /api/progress/:id -> your server /progress/:id
+          const r = await fetch(`/api/progress/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+          if (!r.ok) return;
+          const j = await r.json();
+          // Show "Processing…" only until first download bytes arrive
+          if (!isDownloading()) {
+            const pct = Number.isFinite(j?.progress?.pct) ? j.progress.pct : 0;
+            setStatus(`Processing… ${pct}%`);
+          }
+          if (j?.status === 'done' || j?.status === 'error' || j?.status === 'canceled') {
+            clearInterval(id);
+          }
+        } catch {}
+      }, intervalMs);
+      return () => { stopped = true; clearInterval(id); };
+    }
 
-      const params = new URLSearchParams({
-        code,
-        start: A.toFixed(2),
-        end:   B.toFixed(2),
-        pid
-      });
-      if (isIOS) params.set("solid", "1"); // iPhone-safe MP4
-
-      const clipUrl = `${API_BASE}/clip?${params.toString()}`;
-      const sseUrl  = `${API_BASE}/progress/${pid}`;
-
-      // For desktop (non-iOS), we can start the download immediately;
-      // SSE will still update "preparing" while server pipes data.
-      if (!isIOS) {
-        try { dlWin.location.href = clipUrl; } catch {}
+    // ---- download MP4 via /api/clip (proxied to your server) ----
+    async function downloadClip() {
+      const code = (els.code.value || '').trim();
+      if (!code || !Number.isFinite(A) || !Number.isFinite(B) || B <= A) {
+        return alert('Enter code and set valid A/B times.');
       }
 
-      // Start listening to progress
-      const es = new EventSource(sseUrl);
-      let openedBySSE = false;
+      // Prevent parallel downloads
+      if (dlController) return;
 
-      es.onmessage = (e) => {
-        try {
-          const { pct, done } = JSON.parse(e.data);
-          if (pct != null) {
-            els.status.textContent = `Preparing clip… ${pct}%`;
-            els.barIn.style.width = Math.max(1, Math.min(100, pct)) + "%";
-          }
-          if (done) {
-            els.status.textContent = "Ready — starting download…";
-            els.barIn.style.width = "100%";
-            es.close();
-            if (isIOS && !openedBySSE) {
-              openedBySSE = true;
-              try { dlWin.location.href = clipUrl; } catch {}
-            }
-            // Re-enable button a little later
-            setTimeout(() => { els.download.disabled = false; }, 800);
-          }
-        } catch { /* ignore non-JSON events (hello ping) */ }
-      };
+      // Create job id & start polling server-side "processing" progress
+      const jobId = (crypto.randomUUID?.() || (Date.now() + '_' + Math.random().toString(16).slice(2)));
+      const url = `/api/clip?code=${encodeURIComponent(code)}&start=${A.toFixed(2)}&end=${B.toFixed(2)}&job=${encodeURIComponent(jobId)}`;
 
-      // Fallback: if SSE doesn’t connect within 2.5s, just start the download
-      const sseTimeout = setTimeout(() => {
-        try { es.close(); } catch {}
-        if (isIOS && !openedBySSE) {
-          try { dlWin.location.href = clipUrl; } catch {}
+      showProgress();
+      dlController = new AbortController();
+      let downloadStarted = false;
+      const stopPolling = pollServerProgress(jobId, () => downloadStarted);
+
+      const cancel = () => {
+        if (dlController) {
+          dlController.abort();
+          els.cancelDl.disabled = true;
+          setStatus('Canceling…');
         }
-      }, 2500);
+      };
+      els.cancelDl.onclick = cancel;
 
-      // Close timeout once we have any SSE message
-      es.addEventListener("message", () => clearTimeout(sseTimeout), { once: true });
+      try {
+        const res = await fetch(url, { signal: dlController.signal });
+        if (!res.ok) {
+          const t = await res.text().catch(()=>res.statusText);
+          hideProgress(); dlController = null;
+          stopPolling?.();
+          return alert('Download failed: ' + t);
+        }
+
+        const total = Number(res.headers.get('Content-Length')) || 0;
+
+        if (res.body && res.body.getReader) {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let received = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (!downloadStarted && value && value.byteLength) downloadStarted = true; // flip when first bytes arrive
+            if (done) break;
+            chunks.push(value);
+            received += value.byteLength;
+            setProgress(received, total);
+          }
+
+          // Finish (force 100%)
+          els.dlBar.classList.remove('indeterminate');
+          els.dlBar.style.width = '100%';
+          setStatus('Finalizing…');
+
+          const blob = new Blob(chunks, { type: 'video/mp4' });
+          const name = `clip_${code}_${A}-${B}.mp4`;
+
+          // Share on mobile if possible
+          if (navigator.share && navigator.canShare?.({ files:[new File([blob], name, { type:'video/mp4' })] })) {
+            try {
+              await navigator.share({ files:[new File([blob], name, { type:'video/mp4' })], title:'Clip' });
+              setStatus('Shared ✅');
+              setTimeout(hideProgress, 800);
+              stopPolling?.();
+              dlController = null;
+              return;
+            } catch {/* fall through */}
+          }
+
+          // Fallback: save
+          const a = Object.assign(document.createElement('a'), {
+            href: URL.createObjectURL(blob),
+            download: name
+          });
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+          setStatus('Saved ✅');
+          setTimeout(hideProgress, 800);
+          stopPolling?.();
+        } else {
+          // No readable stream: show indeterminate and just await blob
+          els.dlBar.classList.add('indeterminate');
+          setStatus('Downloading…');
+          const blob = await res.blob();
+          const name = `clip_${code}_${A}-${B}.mp4`;
+
+          const a = Object.assign(document.createElement('a'), {
+            href: URL.createObjectURL(blob),
+            download: name
+          });
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+
+          setStatus('Saved ✅');
+          setTimeout(hideProgress, 800);
+          stopPolling?.();
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          setStatus('Canceled');
+          setTimeout(hideProgress, 500);
+        } else {
+          console.error(err);
+          alert('Download failed: ' + (err?.message || err));
+          hideProgress();
+        }
+      } finally {
+        dlController = null;
+        els.cancelDl.disabled = false;
+      }
     }
 
     // ---- events ----
     els.load.onclick = loadVideo;
+    els.code.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') loadVideo(); });
     els.setA.onclick = setA;
     els.setB.onclick = setB;
     els.preview.onclick = previewClip;
     els.cancelPreview.onclick = cancelPreview;
     els.download.onclick = downloadClip;
-    els.chips.forEach(b => b.onclick = () => { els.vid.currentTime += Number(b.dataset.skip); });
-
-    els.vid.addEventListener("timeupdate", () => { els.tNow.textContent = fmt(els.vid.currentTime|0); });
-    els.vid.addEventListener("loadedmetadata", () => { els.tDur.textContent = fmt(els.vid.duration|0); });
+    els.chips.forEach(b => b.onclick = () => {
+      els.vid.currentTime += Number(b.dataset.skip);
+    });
+    els.vid.addEventListener('timeupdate', () => {
+      els.tNow.textContent = fmt(els.vid.currentTime|0);
+    });
+    els.vid.addEventListener('loadedmetadata', () => {
+      els.tDur.textContent = fmt(els.vid.duration|0);
+    });
 
     // ---- boot from ?code=... if present ----
-    const qCode = qp("code");
+    const qCode = getQP('code');
     if (qCode) { els.code.value = qCode; loadVideo(); }
   </script>
 </body>
 </html>
-
