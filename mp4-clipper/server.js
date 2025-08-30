@@ -4,17 +4,18 @@ import { spawn } from "child_process";
 import os from "os";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 const app = express();
 
-/* ========= Environment (Render → Environment Variables) =========
+/* Env (Render → Environment Variables)
    BASE        required (e.g. https://fision-videos-worker.myfisionupload.workers.dev)
-   PLAYLIST    optional, default: stream_0.m3u8
-   UA          optional, default: a desktop Chrome UA
-   REFERER     optional, set if your origin requires it (e.g. https://your-site)
-   TIMEOUT_MS  optional, default: 20000 (watchdog for first byte in piping mode)
-   SOLID_MP4   optional, default: "" — set "1" to always write solid MP4 (good for iOS)
-   =============================================================== */
+   PLAYLIST    optional (default: stream_0.m3u8)
+   UA          optional (default: desktop Chrome UA used for origin fetch)
+   REFERER     optional (set if origin requires it)
+   TIMEOUT_MS  optional (default: 20000) — watchdog for first byte
+   SOLID_MP4   optional (default: "") — set "1" to always write solid MP4 to temp and then send
+*/
 const BASE        = process.env.BASE;
 const PLAYLIST    = process.env.PLAYLIST || "stream_0.m3u8";
 const UA          = process.env.UA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -22,43 +23,60 @@ const REFERER     = process.env.REFERER || "";
 const TIMEOUT_MS  = Number(process.env.TIMEOUT_MS || 20000);
 const FORCE_SOLID = process.env.SOLID_MP4 === "1";
 
-// ───────────────────────────── health & root ─────────────────────────────
-app.get("/health", (_req, res) => res.type("text").send("OK"));
-app.get("/", (_req, res) => res.type("text").send("Fision clipper is running."));
+/* -------------------------- Progress tracking store ------------------------- */
+const jobs = new Map();             // jobId -> job state
+const sseClients = new Map();       // jobId -> Set(res)
 
-// ───────────────────────────── progress SSE bus ──────────────────────────
-const progress = new Map(); // pid -> Set(res)
-
-function pushProgress(pid, data) {
-  const subs = progress.get(pid);
-  if (!subs) return;
-  const line = `data: ${JSON.stringify(data)}\n\n`;
-  for (const res of subs) {
-    try { res.write(line); } catch { /* ignore */ }
+function makeJobId() {
+  return crypto.randomUUID?.() || (Date.now().toString(36) + Math.random().toString(36).slice(2,10));
+}
+function initJob(jobId, seed) {
+  const job = {
+    id: jobId,
+    status: "starting",           // starting | running | ready | done | error | canceled
+    error: "",
+    requested: { start: 0, end: 0 },
+    snapped: { start: 0, end: 0, duration: 0 },
+    progress: { timeMs: 0, pct: 0 },      // ffmpeg processing progress (0-100)
+    transfer: { bytes: 0, totalBytes: null }, // HTTP bytes to client
+    updatedAt: Date.now(),
+    ...seed,
+  };
+  jobs.set(jobId, job);
+  pushSSE(jobId);
+  return job;
+}
+function patchJob(jobId, patch) {
+  const cur = jobs.get(jobId) || {};
+  const job = { ...cur, ...patch, updatedAt: Date.now() };
+  // deep merge a couple of known sub-objects
+  if (patch?.requested) job.requested = { ...cur.requested, ...patch.requested };
+  if (patch?.snapped)   job.snapped   = { ...cur.snapped,   ...patch.snapped   };
+  if (patch?.progress)  job.progress  = { ...cur.progress,  ...patch.progress  };
+  if (patch?.transfer)  job.transfer  = { ...cur.transfer,  ...patch.transfer  };
+  jobs.set(jobId, job);
+  pushSSE(jobId);
+  return job;
+}
+function endJob(jobId, status, error = "") {
+  const job = patchJob(jobId, { status, error, progress: { ...(jobs.get(jobId)?.progress||{}), pct: status === "done" ? 100 : jobs.get(jobId)?.progress?.pct || 0 } });
+  pushSSE(jobId);
+  return job;
+}
+function pushSSE(jobId) {
+  const clients = sseClients.get(jobId);
+  if (!clients || clients.size === 0) return;
+  const data = JSON.stringify(jobs.get(jobId) || { id: jobId, status: "unknown" });
+  for (const res of clients) {
+    try { res.write(`data: ${data}\n\n`); } catch {}
   }
 }
 
-app.get("/progress/:pid", (req, res) => {
-  const { pid } = req.params;
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
+/* ------------------------------ Basic routes -------------------------------- */
+app.get("/health", (_req, res) => res.type("text").send("OK"));
+app.get("/", (_req, res) => res.type("text").send("Fision clipper is running."));
 
-  if (!progress.has(pid)) progress.set(pid, new Set());
-  const subs = progress.get(pid);
-  subs.add(res);
-
-  // hello event
-  res.write(`event: hello\ndata: ${JSON.stringify({ pid })}\n\n`);
-
-  req.on("close", () => {
-    subs.delete(res);
-    if (subs.size === 0) progress.delete(pid);
-  });
-});
-
-// ───────────────────────────── debug probe (optional) ─────────────────────
+/* Probe helper (unchanged) */
 app.get("/probe", async (req, res) => {
   try {
     const code = String(req.query.code || "").trim();
@@ -72,7 +90,7 @@ app.get("/probe", async (req, res) => {
   }
 });
 
-// ─────────────────────────── HLS helpers (VOD) ────────────────────────────
+/* -------------------- Playlist boundary helpers (unchanged) ------------------ */
 function parseBoundaries(m3u8Text) {
   const lines = m3u8Text.split(/\r?\n/);
   const b = [0];
@@ -85,38 +103,55 @@ function parseBoundaries(m3u8Text) {
       b.push(acc);
     }
   }
-  return b; // [0, t1, t2, ..., total]
+  return b;
 }
-function floorBoundary(b, t) { // largest boundary <= t
-  let lo = 0, hi = b.length - 1;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi + 1) / 2);
-    if (b[mid] <= t) lo = mid; else hi = mid - 1;
-  }
-  return b[lo];
-}
-function ceilBoundary(b, t) { // smallest boundary >= t
-  let lo = 0, hi = b.length - 1;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (b[mid] >= t) hi = mid; else lo = mid + 1;
-  }
-  return b[lo];
-}
+function floorBoundary(b, t) { let lo = 0, hi = b.length - 1; while (lo < hi) { const mid = Math.floor((lo + hi + 1) / 2); if (b[mid] <= t) lo = mid; else hi = mid - 1; } return b[lo]; }
+function ceilBoundary(b, t)  { let lo = 0, hi = b.length - 1; while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if (b[mid] >= t) hi = mid; else lo = mid + 1; } return b[lo]; }
 
-// ───────────────────────────── main clip endpoint ─────────────────────────
+/* ----------------------------- Progress APIs -------------------------------- */
+// JSON polling
+app.get("/progress/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  res.json(job);
+});
+// SSE (live)
+app.get("/progress-stream/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.flushHeaders?.();
+
+  if (!sseClients.has(jobId)) sseClients.set(jobId, new Set());
+  sseClients.get(jobId).add(res);
+
+  // send snapshot immediately
+  res.write(`data: ${JSON.stringify(jobs.get(jobId) || { id: jobId, status: "unknown" })}\n\n`);
+
+  req.on("close", () => {
+    const set = sseClients.get(jobId);
+    if (set) set.delete(res);
+  });
+});
+
+/* -------------------------------- /clip ------------------------------------- */
 app.get("/clip", async (req, res) => {
   try {
     if (!BASE) return res.status(500).type("text").end("Server misconfigured: BASE is not set");
 
+    // NEW: job id for progress (client can pass ?job=...; otherwise generate one)
+    const jobId = String(req.query.job || makeJobId());
+    res.setHeader("X-Job-Id", jobId); // header becomes visible once response starts
+
     const code  = String(req.query.code || "").trim();
     const start = Number(req.query.start || 0);
     const end   = Number(req.query.end   || 0);
-    const pid   = String(req.query.pid || "");               // progress id (optional)
-    const solidQuery = String(req.query.solid || "");        // force solid=1 per request
-    const debug = String(req.query.debug || "") === "1";     // verbose ffmpeg logs (optional)
-
     if (!code || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      initJob(jobId, { status: "error", error: "Bad params: code/start/end" });
       return res.status(400).type("text").end("Bad params: code/start/end");
     }
 
@@ -125,7 +160,10 @@ app.get("/clip", async (req, res) => {
 
     // fetch playlist to compute segment boundaries
     const r = await fetch(m3u8Url, { headers: { "user-agent": UA, ...(REFERER ? { referer: REFERER } : {}) } });
-    if (!r.ok) return res.status(502).type("text").end(`Failed to fetch playlist: HTTP ${r.status}`);
+    if (!r.ok) {
+      initJob(jobId, { status: "error", error: `Failed to fetch playlist: HTTP ${r.status}` });
+      return res.status(502).type("text").end(`Failed to fetch playlist: HTTP ${r.status}`);
+    }
     const playlistText = await r.text();
     const boundaries = parseBoundaries(playlistText);
     const total = boundaries[boundaries.length - 1] || 0;
@@ -134,83 +172,87 @@ app.get("/clip", async (req, res) => {
     const sReq = Math.max(0, Math.min(start, Math.max(0, total - 0.001)));
     const eReq = Math.max(0, Math.min(end, total));
 
-    // snap to whole segments (fast, stream-copy)
+    // snap to whole segments
     const sSnap = floorBoundary(boundaries, sReq);
     let eSnap  = ceilBoundary(boundaries, eReq);
     if (eSnap <= sSnap) {
-      // ensure at least one segment
       const idx = boundaries.indexOf(sSnap);
       eSnap = boundaries[Math.min(idx + 1, boundaries.length - 1)];
     }
     const dur = +(eSnap - sSnap).toFixed(3);
     const filename = `clip_${code}_${Math.floor(sReq)}-${Math.floor(eReq)}.mp4`;
 
-    // Decide container mode:
-    // - iOS UA OR ?solid=1 OR SOLID_MP4=1  → solid MP4 (write to temp, +faststart) to avoid iOS 1s bug
-    // - else → fragmented MP4 piped (fast first byte in desktop browsers)
-    const reqUA = String(req.headers["user-agent"] || "");
-    const isIOS = /iPhone|iPad|iPod/i.test(reqUA);
-    const wantSolid = FORCE_SOLID || isIOS || solidQuery === "1";
+    // Initialize job state
+    initJob(jobId, {
+      status: "running",
+      requested: { start: +sReq.toFixed(3), end: +eReq.toFixed(3) },
+      snapped:   { start: +sSnap.toFixed(3), end: +eSnap.toFixed(3), duration: dur },
+      progress:  { timeMs: 0, pct: 0 },
+      transfer:  { bytes: 0, totalBytes: null }
+    });
+
+    // Decide container mode
+    const ua = String(req.headers["user-agent"] || "");
+    const isIOS = /iPhone|iPad|iPod/i.test(ua);
+    const wantSolid = FORCE_SOLID || isIOS || String(req.query.solid || "") === "1";
 
     // Optional headers for origin
     const headerLines = [];
     if (REFERER) headerLines.push(`Referer: ${REFERER}`);
     const headersArg = headerLines.length ? ["-headers", headerLines.join("\r\n")] : [];
 
+    // FFmpeg args
     const baseArgs = [
-      "-hide_banner","-loglevel", debug ? "info" : "error","-nostdin",
+      "-hide_banner","-loglevel","error","-nostdin",
       "-protocol_whitelist","file,crypto,https,tcp,tls",
-      "-rw_timeout","30000000",     // 30s per I/O op
+      "-rw_timeout","15000000",
       "-user_agent", UA,
       "-allowed_extensions","ALL",
       "-http_persistent","0",
       "-reconnect","1",
       "-reconnect_streamed","1",
       "-reconnect_on_http_error","4xx,5xx",
-      "-reconnect_delay_max","8",
+      "-reconnect_delay_max","5",
       ...headersArg,
 
-      // progress channel
-      "-progress","pipe:2",
-
-      // fast seek to snapped start & duration to end boundary
       "-ss", String(sSnap),
       "-i", m3u8Url,
       "-t", String(dur),
 
-      // map (copy only)
       "-map","0:v?","-map","0:a?",
       "-c:v","copy",
       "-c:a","copy",
       "-bsf:a","aac_adtstoasc",
+
+      // NEW: structured progress to stderr so we can compute % before first byte
+      "-progress","pipe:2",
+      "-stats_period","0.5",
     ];
 
     let args, outputTarget;
     if (wantSolid) {
-      // Solid MP4: write to temp, then send with Content-Length
       const tmp = path.join(os.tmpdir(), `${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
       args = [...baseArgs, "-movflags","+faststart", "-f","mp4", tmp];
       outputTarget = tmp;
     } else {
-      // Fragmented MP4 over pipe (fast start for browsers)
       args = [...baseArgs, "-movflags","+frag_keyframe+empty_moov+faststart", "-f","mp4", "pipe:1"];
       outputTarget = "pipe:1";
     }
 
     const ff = spawn("ffmpeg", args, { stdio: ["ignore","pipe","pipe"] });
 
-    // Only kill early in piping mode; for solid path we prefer to finish preparing
-    if (!wantSolid) {
-      req.on("aborted", () => { try { ff.kill("SIGKILL"); } catch {} });
-    } else {
-      req.on("aborted", () => { console.warn("client aborted; continuing solid MP4 preparation"); });
-    }
+    // Cancel if client disconnects
+    req.on("aborted", () => {
+      try { ff.kill("SIGKILL"); } catch {}
+      endJob(jobId, "canceled");
+    });
 
     let sentHeaders = false;
     let hadData = false;
     let errLog = "";
+    let progBuf = ""; // buffer for parsing -progress lines
 
-    // Watchdog: bail if no first byte within TIMEOUT_MS (piping mode only)
+    // watchdog for first byte when piping
     const watchdog = !wantSolid ? setTimeout(() => {
       if (!hadData) {
         console.warn("watchdog: no data within timeout, killing ffmpeg");
@@ -218,24 +260,13 @@ app.get("/clip", async (req, res) => {
       }
     }, TIMEOUT_MS) : null;
 
-    // parse ffmpeg progress for SSE
-    ff.stderr.on("data", (d) => {
-      const s = d.toString();
-      errLog += s;
-      if (pid) {
-        const ms = s.match(/out_time_ms=(\d+)/);
-        if (ms) {
-          const outUs = parseInt(ms[1], 10);
-          const pct = dur > 0 ? Math.min(100, (outUs / (dur * 1e6)) * 100) : 0;
-          pushProgress(pid, { pct: +pct.toFixed(1) });
-        }
-        if (/progress=end/.test(s)) pushProgress(pid, { done: true });
-      }
-      if (debug) console.error("[ffmpeg]", s.trim());
-    });
-
+    // STREAMING mode: write to client immediately
     if (!wantSolid) {
-      // stream out immediately (fragmented MP4 piping)
+      // Count bytes for transfer progress
+      ff.stdout.on("data", (chunk) => {
+        patchJob(jobId, { transfer: { bytes: (jobs.get(jobId)?.transfer?.bytes || 0) + chunk.length } });
+      });
+
       ff.stdout.once("data", (chunk) => {
         hadData = true;
         if (watchdog) clearTimeout(watchdog);
@@ -249,20 +280,51 @@ app.get("/clip", async (req, res) => {
           res.setHeader("X-Clip-Requested-End",   String(eReq.toFixed(3)));
           res.setHeader("X-Clip-Snapped-Start",   String(sSnap.toFixed(3)));
           res.setHeader("X-Clip-Snapped-End",     String(eSnap.toFixed(3)));
+          res.setHeader("X-Job-Id", jobId);
         }
         res.write(chunk);
         ff.stdout.pipe(res);
       });
     }
 
+    // Parse ffmpeg progress & error logs from stderr
+    ff.stderr.on("data", (d) => {
+      const s = d.toString();
+      errLog += s;
+
+      // Parse -progress key=value lines
+      progBuf += s;
+      let idx;
+      while ((idx = progBuf.indexOf("\n")) >= 0) {
+        const line = progBuf.slice(0, idx).trim();
+        progBuf = progBuf.slice(idx + 1);
+        const kv = line.split("=");
+        if (kv.length === 2) {
+          const [key, val] = kv;
+          if (key === "out_time_ms") {
+            const ms = Number(val) || 0;
+            const pct = Math.max(0, Math.min(99, Math.round((ms / (dur * 1000)) * 100)));
+            patchJob(jobId, { progress: { timeMs: ms, pct } });
+          } else if (key === "progress" && val === "end") {
+            // ffmpeg reports processing done (transfer may continue for solid mode)
+            patchJob(jobId, { progress: { ...(jobs.get(jobId)?.progress||{}), pct: 100 } });
+          }
+        }
+      }
+      // Also log concise error lines to console
+      if (s.trim()) console.error("[ffmpeg]", s.trim());
+    });
+
     ff.on("exit", async (codeExit, signal) => {
       if (watchdog) clearTimeout(watchdog);
 
       if (wantSolid) {
-        // send finished file
+        // send the finished solid MP4 file
         if (codeExit === 0 && !signal) {
           try {
             const st = await fs.promises.stat(outputTarget);
+            patchJob(jobId, { status: "ready", transfer: { totalBytes: st.size } });
+
             res.status(200);
             res.setHeader("Content-Type", "video/mp4");
             res.setHeader("Cache-Control", "no-store");
@@ -272,35 +334,44 @@ app.get("/clip", async (req, res) => {
             res.setHeader("X-Clip-Requested-End",   String(eReq.toFixed(3)));
             res.setHeader("X-Clip-Snapped-Start",   String(sSnap.toFixed(3)));
             res.setHeader("X-Clip-Snapped-End",     String(eSnap.toFixed(3)));
+            res.setHeader("X-Job-Id", jobId);
 
             const read = fs.createReadStream(outputTarget);
+            read.on("data", (chunk) => {
+              patchJob(jobId, { transfer: { bytes: (jobs.get(jobId)?.transfer?.bytes || 0) + chunk.length } });
+            });
             read.pipe(res);
-            read.on("close", async () => { try { await fs.promises.unlink(outputTarget); } catch {} });
+            read.on("close", async () => {
+              try { await fs.promises.unlink(outputTarget); } catch {}
+              endJob(jobId, "done");
+            });
             return;
           } catch (e) {
             console.error("send solid file error", e);
           }
         }
         const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
-        res.setHeader("X-Debug-Error", msg.slice(0, 200));
+        endJob(jobId, "error", msg);
         return res.status(500).type("text").end(msg);
       } else {
         // piping mode
         if (!hadData && !sentHeaders) {
           const msg = (errLog.trim() || `ffmpeg exited. code=${codeExit} signal=${signal}`).slice(0, 1800);
-          res.setHeader("X-Debug-Error", msg.slice(0, 200));
+          endJob(jobId, "error", msg);
           return res.status(500).type("text").end(msg);
         }
         if (!res.writableEnded) res.end();
         if (codeExit !== 0 || signal) {
           console.error("ffmpeg exit", { codeExit, signal, err: errLog });
         }
+        endJob(jobId, "done");
       }
     });
 
     ff.on("error", (e) => {
       if (watchdog) clearTimeout(watchdog);
       console.error("spawn error", e);
+      endJob(jobId, "error", e.message || String(e));
       if (!sentHeaders) res.status(500).type("text").end("spawn error: " + (e.message || e));
       else try { res.end(); } catch {}
     });
