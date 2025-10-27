@@ -62,18 +62,18 @@ function setPill(active) {
   }
 }
 async function refreshStatus() {
-  if (!cameraId) return;
-  try {
-    const r = await fetch(
-      `/record/status?cameraId=${encodeURIComponent(cameraId)}`
-    );
-    const j = await r.json();
-    setPill(!!j.active);
-  } catch {
-    pill.textContent = "Status unknown";
-    pill.classList.remove("hidden");
-  }
+    if (!cameraId) return;
+    try {
+      const r = await fetch(`/api/record/status?cameraId=${encodeURIComponent(cameraId)}`);
+      const j = await r.json();
+      setPill(!!j.active, j); // optionally pass details
+    } catch {
+      pill.textContent = "Status unknown";
+      pill.classList.remove("hidden");
+    }
 }
+  
+
 
 // --- actions ------------------------------------------------------------
 sendBtn.onclick = async () => {
@@ -86,7 +86,7 @@ sendBtn.onclick = async () => {
 
   setLoading(sendBtn, true);
   try {
-    const r = await fetch("/auth/send-otp", {
+    const r = await fetch("/api/auth/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone }),
@@ -121,7 +121,7 @@ verifyBtn.onclick = async () => {
 
   setLoading(verifyBtn, true);
   try {
-    const res = await fetch("/auth/verify-otp", {
+    const res = await fetch("/api/auth/verify-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone: sentPhone, cameraId, code }),
@@ -152,7 +152,7 @@ startBtn.onclick = async () => {
   }
   setLoading(startBtn, true);
   try {
-    const res = await fetch("/record/start", {
+    const res = await fetch("/api/record/start", {
       method: "POST",
       headers: { Authorization: "Bearer " + token },
     });
@@ -166,7 +166,7 @@ startBtn.onclick = async () => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = setInterval(async () => {
         try {
-          await fetch("/record/heartbeat", {
+          await fetch("/api/record/heartbeat", {
             method: "POST",
             headers: { Authorization: "Bearer " + token },
           });
@@ -188,7 +188,7 @@ stopBtn.onclick = async () => {
   }
   setLoading(stopBtn, true);
   try {
-    const res = await fetch("/record/stop", {
+    const res = await fetch("/api/record/stop", {
       method: "POST",
       headers: { Authorization: "Bearer " + token },
     });
