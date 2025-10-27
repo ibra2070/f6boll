@@ -6,21 +6,6 @@
     { "src": "api/index.js", "use": "@vercel/node" }
   ],
 
-  "headers": [
-    {
-      "source": "/(record|record.html|watch|watch.html|watch1|watch1.html|record.js|watch.js|watch1.js|hls.min.js|panzoom.min.js)",
-      "headers": [
-        {
-          "key": "Content-Security-Policy",
-          "value": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; script-src-attr 'none'; style-src 'self' https: 'unsafe-inline'; connect-src 'self' fision-videos-worker.myfisionupload.workers.dev *.cloudflarestream.com; media-src 'self' blob: fision-videos-worker.myfisionupload.workers.dev *.cloudflarestream.com; img-src 'self' data: fision-videos-worker.myfisionupload.workers.dev *.cloudflarestream.com; font-src 'self' https: data:; upgrade-insecure-requests"
-        },
-        { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "SAMEORIGIN" }
-      ]
-    }
-  ],
-
   "rewrites": [
     
     { "source": "/api/clip",                "destination": "https://f6boll.onrender.com/clip" },
@@ -39,9 +24,6 @@
     { "source": "/watch1",                  "destination": "/public/watch1.html" },
 
     
-    { "source": "/auth/(.*)",               "destination": "/public/auth/$1" },
     { "source": "/(.*)",                    "destination": "/public/$1" }
   ]
 }
-
-
