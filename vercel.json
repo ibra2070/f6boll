@@ -2,9 +2,13 @@
   "version": 2,
   "cleanUrls": true,
 
+  "builds": [
+    { "src": "api/index.js", "use": "@vercel/node" }
+  ],
+
   "headers": [
     {
-      "source": "/(record.html|watch.html|watch1.html|watch.js|watch1.js|hls.min.js|panzoom.min.js)",
+      "source": "/(record|record.html|watch|watch.html|watch1|watch1.html|record.js|watch.js|watch1.js|hls.min.js|panzoom.min.js)",
       "headers": [
         {
           "key": "Content-Security-Policy",
@@ -15,10 +19,6 @@
         { "key": "X-Frame-Options", "value": "SAMEORIGIN" }
       ]
     }
-  ],
-
-  "builds": [
-    { "src": "api/index.js", "use": "@vercel/node" }
   ],
 
   "rewrites": [
@@ -33,7 +33,15 @@
     { "source": "/api/(.*)",                "destination": "/api/index.js" },
 
     
+    { "source": "/",                        "destination": "/public/index.html" },
+    { "source": "/record",                  "destination": "/public/record.html" },
+    { "source": "/watch",                   "destination": "/public/watch.html" },
+    { "source": "/watch1",                  "destination": "/public/watch1.html" },
+
+    
+    { "source": "/auth/(.*)",               "destination": "/public/auth/$1" },
     { "source": "/(.*)",                    "destination": "/public/$1" }
   ]
 }
+
 
