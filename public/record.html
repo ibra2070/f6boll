@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Camera Record – Phone Verification</title>
+
+  <style>
+    :root{
+      --green:#16c172; --green-dark:#0ea862;
+      --bg:#0b0b0b; --card:#111; --muted:#909090; --text:#f4f8f7;
+      --danger:#ff5d5d; --border:#1e1e1e;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Helvetica,Arial,sans-serif;display:flex;align-items:flex-start;justify-content:center;padding:28px 16px}
+    .card{width:min(680px,100%);background:linear-gradient(180deg,#121212,#0d0d0d);border:1px solid var(--border);border-radius:18px;padding:28px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    .brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+    .brand img{height:36px;width:auto;display:block}
+    .brand .title{font-weight:700;letter-spacing:.2px;font-size:20px;color:var(--text)}
+    h1{margin:.2rem 0 1rem;font-size:30px;line-height:1.15}
+    .cam{color:var(--muted);font-size:14px;margin:-6px 0 18px}
+
+    label{display:block;margin:.75rem 0 .4rem;color:var(--muted);font-size:14px}
+    input{width:100%;padding:14px 16px;border-radius:12px;background:#0a0a0a;border:1px solid var(--border);color:var(--text);font-size:16px;outline:none;transition:border .15s ease, box-shadow .15s ease}
+    input:focus{border-color:#1f8f64;box-shadow:0 0 0 3px rgba(22,193,114,.15)}
+    input[disabled]{opacity:.65}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .btn{width:100%;border:0;border-radius:12px;padding:14px 20px;font-size:18px;font-weight:700;color:#08130f;background:var(--green);cursor:pointer;transition:transform .06s ease, background .15s ease, opacity .15s ease}
+    .btn:hover{background:var(--green-dark)}
+    .btn:active{transform:translateY(1px)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:13px;margin-top:6px}
+    .hidden{display:none !important}
+    .panel{margin-top:22px;padding:18px;border:1px dashed #1d332a;border-radius:12px;background:#0b1511}
+    pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0a0a0a;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:12px;color:#cde8db;max-height:220px;overflow:auto}
+    .alert{margin:10px 0;padding:12px 14px;border-radius:10px;border:1px solid #2a2a2a;background:#121212}
+    .alert.ok{border-color:#214f3b;background:#0f1d17;color:#9fe9c7}
+    .alert.err{border-color:#4f2121;background:#1d0f0f;color:#ffb4b4}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid #214f3b;background:#0f1d17;color:#9fe9c7;font-size:12px;margin-left:8px}
+    .pill.red{border-color:#4f2121;background:#1d0f0f;color:#ffb4b4}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+      <img src="logo.png" alt="Logo" />
+      <div class="title">hii LTD</div>
+    </div>
+
+    <h1>Verify your phone</h1>
+    <div class="cam" id="camLabel"></div>
+
+    <div id="msg" class="alert hidden"></div>
+
+    <label for="phone">Phone (E.164 format)</label>
+    <input id="phone" placeholder="+9725..." autocomplete="tel" inputmode="tel" />
+    <button id="send" class="btn">Send OTP</button>
+    <div class="muted">We’ll text you a 6-digit code. Standard carrier rates may apply.</div>
+
+    <div id="step2" class="hidden">
+      <label for="code">Enter code</label>
+      <div class="row">
+        <input id="code" placeholder="123456" autocomplete="one-time-code" />
+      </div>
+      <button id="verify" class="btn">Verify</button>
+    </div>
+
+    <section id="controls" class="panel hidden">
+      <h3 style="margin:0 0 10px">
+        Recording Controls
+        <span id="statusPill" class="pill hidden">Checking…</span>
+      </h3>
+      <div class="row">
+        <button id="start" class="btn">Start Recording</button>
+        <button id="stop"  class="btn" style="background:#1c2521;color:#b7d7c8">Stop Recording</button>
+      </div>
+      <pre id="out"></pre>
+    </section>
+  </main>
+
+  <!-- External script to satisfy CSP: script-src 'self' -->
+  <script src="record.js" defer></script>
+</body>
+</html>
+

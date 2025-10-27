@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Watch & Download Clip (MP4)</title>
+  <title>Watch (Cloudflare Stream) & Download Clip (MP4)</title>
   <style>
     :root { --green:#00ff88; --bg:#0b0b0b; --muted:#9aa1a8; }
     *{box-sizing:border-box}
@@ -83,7 +83,7 @@
 
     <!-- controls -->
     <div class="row" style="margin-top:12px">
-      <input id="code" type="text" placeholder="Enter game code e.g. mo2nes1" />
+      <input id="code" type="text" placeholder="Enter Cloudflare Stream UID (32 hex) or full .m3u8 URL" />
       <button id="loadBtn">Load</button>
     </div>
 
@@ -143,10 +143,10 @@
     </div>
   </div>
 
-  <!-- Load libraries from your domain to satisfy CSP 'self' -->
+  <!-- local libs to satisfy CSP 'self' -->
   <script src="hls.min.js"></script>
   <script src="panzoom.min.js"></script>
-  <!-- App logic (external file; no inline JS) -->
-  <script src="watch.js" defer></script>
+  <!-- page logic -->
+  <script src="watch1.js" defer></script>
 </body>
 </html>
