@@ -25,7 +25,7 @@
     { "source": "/api/comments",                "destination": "https://f6boll.onrender.com/comments" },
 
     
-    
+    { "source": "/auth/:path*",   "destination": "/api/index" },
     { "source": "/record/:path*", "destination": "/api/index" },
     { "source": "/health",        "destination": "/api/index" }
   ]
