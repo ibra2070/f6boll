@@ -24,22 +24,6 @@ function logAny(outEl, payload) {
   }
 }
 
-// --- API prefix detection (local vs Vercel) ------------------------------
-// Locally (served by the same Express app), routes are like `/auth/...`.
-// On Vercel, your Express app is mounted at `/api/...`.
-const isLocalHost =
-  location.hostname === "localhost" ||
-  location.hostname === "127.0.0.1";
-
-// If you ever serve from /public locally, this still counts as local.
-const API_PREFIX = isLocalHost ? "" : "/api";
-
-// Helper for fetch calls
-function api(path, opts) {
-  const url = `${API_PREFIX}${path}`;
-  return fetch(url, opts);
-}
-
 // --- camera id display (supports camerald typo too) ---------------------
 const params = new URLSearchParams(location.search);
 const cameraId = params.get("cameraId") || params.get("camerald") || "";
@@ -77,11 +61,12 @@ function setPill(active) {
     pill.classList.add("red");
   }
 }
-
 async function refreshStatus() {
   if (!cameraId) return;
   try {
-    const r = await api(`/record/status?cameraId=${encodeURIComponent(cameraId)}`);
+    const r = await fetch(
+      `/record/status?cameraId=${encodeURIComponent(cameraId)}`
+    );
     const j = await r.json();
     setPill(!!j.active);
   } catch {
@@ -101,7 +86,7 @@ sendBtn.onclick = async () => {
 
   setLoading(sendBtn, true);
   try {
-    const r = await api("/auth/send-otp", {
+    const r = await fetch("/auth/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone }),
@@ -136,12 +121,12 @@ verifyBtn.onclick = async () => {
 
   setLoading(verifyBtn, true);
   try {
-    const res = await api("/auth/verify-otp", {
+    const res = await fetch("/auth/verify-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone: sentPhone, cameraId, code }),
     });
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json();
     if (!res.ok) {
       throw new Error(data.error || "Verification failed");
     }
@@ -167,7 +152,7 @@ startBtn.onclick = async () => {
   }
   setLoading(startBtn, true);
   try {
-    const res = await api("/record/start", {
+    const res = await fetch("/record/start", {
       method: "POST",
       headers: { Authorization: "Bearer " + token },
     });
@@ -181,7 +166,7 @@ startBtn.onclick = async () => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = setInterval(async () => {
         try {
-          await api("/record/heartbeat", {
+          await fetch("/record/heartbeat", {
             method: "POST",
             headers: { Authorization: "Bearer " + token },
           });
@@ -203,7 +188,7 @@ stopBtn.onclick = async () => {
   }
   setLoading(stopBtn, true);
   try {
-    const res = await api("/record/stop", {
+    const res = await fetch("/record/stop", {
       method: "POST",
       headers: { Authorization: "Bearer " + token },
     });
