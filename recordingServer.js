@@ -94,13 +94,14 @@ let db, Users, Recordings;
   db = client.db();
   Users = db.collection('users');
   Recordings = db.collection('recordings');
+  console.log('Mongo initialized');
 
   // Useful indexes
   await Users.createIndex({ phone: 1 }, { unique: true });
   await Recordings.createIndex({ cameraId: 1, lockOwnerTokenId: 1 });
   await Recordings.createIndex({ status: 1, cameraId: 1, startedAt: -1 });
 })().catch(err => {
-  console.error('Mongo init error:', err);
+  console.warn('Mongo init failed; continuing without Mongo:', err.message);
 });
 
 // ── Email (Gmail App Password) ───────────────────────────────────────────────
@@ -245,11 +246,19 @@ app.post('/auth/verify-otp', async (req, res) => {
     const lockOwnerTokenId = Math.random().toString(36).slice(2);
     const token = signJwt({ phone, cameraId, lockOwnerTokenId }, '2h');
 
-    await Users.updateOne(
-      { phone },
-      { $setOnInsert: { phone, createdAt: new Date() } },
-      { upsert: true }
-    );
+    try {
+      if (Users) {
+        await Users.updateOne(
+          { phone },
+          { $setOnInsert: { phone, createdAt: new Date() } },
+          { upsert: true }
+        );
+      } else {
+        console.warn('Mongo Users collection not ready; skipping user upsert');
+      }
+    } catch (e) {
+      console.warn('User upsert failed; continuing verification:', e.message);
+    }
 
     res.json({ token });
   } catch (e) {
