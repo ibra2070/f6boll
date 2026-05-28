@@ -3,6 +3,7 @@
   "cleanUrls": true,
 
   "builds": [
+    { "src": "public/**", "use": "@vercel/static" },
     { "src": "api/index.js", "use": "@vercel/node" }
   ],
 
@@ -18,7 +19,7 @@
     { "source": "/api/(.*)",                "destination": "/api/index.js" },
 
     
-    { "source": "/",                        "destination": "/public/index.html" },
+    { "source": "/",                        "destination": "/public/record.html" },
     { "source": "/record",                  "destination": "/public/record.html" },
     { "source": "/watch",                   "destination": "/public/watch.html" },
     { "source": "/watch1",                  "destination": "/public/watch1.html" },
