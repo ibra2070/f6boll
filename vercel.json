@@ -19,12 +19,12 @@
     { "source": "/api/(.*)",                "destination": "/api/index.js" },
 
     
-    { "source": "/",                        "destination": "/public/record.html" },
-    { "source": "/record",                  "destination": "/public/record.html" },
-    { "source": "/watch",                   "destination": "/public/watch.html" },
-    { "source": "/watch1",                  "destination": "/public/watch1.html" },
+    { "source": "/",                        "destination": "/record.html" },
+    { "source": "/record",                  "destination": "/record.html" },
+    { "source": "/watch",                   "destination": "/watch.html" },
+    { "source": "/watch1",                  "destination": "/watch1.html" },
 
     
-    { "source": "/(.*)",                    "destination": "/public/$1" }
+    { "source": "/(.*)",                    "destination": "/$1" }
   ]
 }
