@@ -10,18 +10,50 @@ function showMsg(text, type = "ok") {
 function hideMsg() {
   msgBox.classList.add("hidden");
 }
-const normPhone = (v) => v.trim().replace(/\s+/g, "");
+function normalizeIsraeliPhone(value) {
+  const compact = value.trim().replace(/[\s-]/g, "");
+  if (/^05\d{8}$/.test(compact)) {
+    return `+972${compact.slice(1)}`;
+  }
+  if (/^\+?9725\d{8}$/.test(compact)) {
+    return compact.startsWith("+") ? compact : `+${compact}`;
+  }
+  return null;
+}
 function setLoading(btn, loading) {
   btn.disabled = loading;
   btn.textContent = loading ? "Please wait…" : btn.dataset.label;
 }
-function logAny(outEl, payload) {
-  try {
-    const obj = typeof payload === "string" ? JSON.parse(payload) : payload;
-    outEl.textContent = JSON.stringify(obj, null, 2);
-  } catch {
-    outEl.textContent = String(payload);
+
+function customerError(action, status) {
+  if (status === 401 || status === 403) {
+    return "Please verify your phone again, then try once more.";
   }
+  if (status === 409) {
+    return "Recording is not available at this time.";
+  }
+  if (action === "start" && status === 423) {
+    return "Your recording request is already being processed. Please wait a moment.";
+  }
+  if (status === 429) {
+    return "Please wait a minute before requesting another code.";
+  }
+  if (action === "start" && status === 422) {
+    return "Recording is not available at this time.";
+  }
+  if (action === "start" && status >= 500) {
+    return "The recording service is unavailable right now. Please try again shortly.";
+  }
+  if (action === "sendCode") {
+    return "We couldn’t send the verification code. Please check your phone number and try again.";
+  }
+  if (action === "verify") {
+    return "That code didn’t work. Please check the SMS and try again.";
+  }
+  if (action === "start") {
+    return "We couldn’t start the recording. Please try again or ask the staff for help.";
+  }
+  return "Something went wrong. Please try again.";
 }
 
 // --- API prefix detection (local vs Vercel) ------------------------------
@@ -44,58 +76,92 @@ function api(path, opts) {
 const params = new URLSearchParams(location.search);
 const cameraId = params.get("cameraId") || params.get("camerald") || "";
 $("#camLabel").textContent = cameraId
-  ? `Camera: ${cameraId}`
-  : "Camera: (missing id)";
+  ? `Camera ${cameraId}`
+  : "This recording link is missing camera details. Please scan the QR code again or ask the staff for a new link.";
 
 // --- state --------------------------------------------------------------
 let token = null;
 let sentPhone = null;
-let heartbeatTimer = null;
-let statusTimer = null;
 
 const phoneEl = $("#phone");
 const codeEl = $("#code");
 const sendBtn = $("#send");
 const verifyBtn = $("#verify");
 const startBtn = $("#start");
-const stopBtn = $("#stop");
 const outEl = $("#out");
 const pill = $("#statusPill");
+const copyNumberBtn = $("#copyNumber");
+const copyStatus = $("#copyStatus");
+let statusCheckPending = false;
+let startRequestPending = false;
 
-sendBtn.dataset.label = "Send OTP";
+sendBtn.dataset.label = "Send verification code";
 verifyBtn.dataset.label = "Verify";
 startBtn.dataset.label = "Start Recording";
-stopBtn.dataset.label = "Stop Recording";
 
-function setPill(active) {
-  pill.classList.remove("hidden");
-  if (active) {
-    pill.textContent = "Active";
-    pill.classList.remove("red");
-  } else {
-    pill.textContent = "Idle";
-    pill.classList.add("red");
+copyNumberBtn.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText("0506360021");
+    copyStatus.textContent = "Number copied";
+  } catch {
+    copyStatus.textContent = "Could not copy. Use 050-636-0021.";
   }
+};
+
+if (!cameraId) {
+  sendBtn.disabled = true;
+  phoneEl.disabled = true;
+  showMsg("This link can’t start a recording because the camera is missing. Please scan the QR code again or ask the staff for help.", "err");
 }
 
-async function refreshStatus() {
-  if (!cameraId) return;
+function reservationMessage(until) {
+  const match = typeof until === "string" ? until.match(/(\d{2}:\d{2})$/) : null;
+  return match
+    ? `This pitch is already reserved until ${match[1]}.`
+    : "This pitch is already reserved right now.";
+}
+
+async function checkAvailability(showBusyMessage = true) {
+  if (!cameraId || statusCheckPending) return null;
+  statusCheckPending = true;
   try {
-    const r = await api(`/record/status?cameraId=${encodeURIComponent(cameraId)}`);
-    const j = await r.json();
-    setPill(!!j.active);
+    const res = await api(`/record/status?cameraId=${encodeURIComponent(cameraId)}`);
+    if (!res.ok) return null;
+    const status = await res.json().catch(() => ({}));
+    if (status.available === false) {
+      startBtn.disabled = true;
+      startBtn.classList.add("hidden");
+      pill.textContent = "Reserved";
+      pill.classList.remove("hidden");
+      pill.classList.add("red");
+      if (showBusyMessage) showMsg(reservationMessage(status.until), "err");
+      return false;
+    }
+    if (status.available === true) {
+      if (!startRequestPending) startBtn.disabled = false;
+      startBtn.classList.remove("hidden");
+      pill.textContent = "Available";
+      pill.classList.remove("hidden", "red");
+      return true;
+    }
+    return null;
   } catch {
-    pill.textContent = "Status unknown";
-    pill.classList.remove("hidden");
+    return null;
+  } finally {
+    statusCheckPending = false;
   }
 }
 
 // --- actions ------------------------------------------------------------
 sendBtn.onclick = async () => {
   hideMsg();
-  const phone = normPhone(phoneEl.value);
-  if (!phone || !phone.startsWith("+")) {
-    showMsg("Enter your phone in international format, e.g. +9725…", "err");
+  if (!cameraId) {
+    showMsg("This link can’t start a recording because the camera is missing. Please scan the QR code again or ask the staff for help.", "err");
+    return;
+  }
+  const phone = normalizeIsraeliPhone(phoneEl.value);
+  if (!phone) {
+    showMsg("Enter a valid Israeli mobile number, for example 054-919-5229.", "err");
     return;
   }
 
@@ -106,17 +172,17 @@ sendBtn.onclick = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone }),
     });
-    const j = await r.json().catch(() => ({}));
     if (!r.ok) {
-      throw new Error(j.error || "Failed to send OTP");
+      showMsg(customerError("sendCode", r.status), "err");
+      return;
     }
 
     sentPhone = phone;
     phoneEl.disabled = true;
     $("#step2").classList.remove("hidden");
     showMsg("Code sent. Check your SMS.", "ok");
-  } catch (err) {
-    showMsg(err.message || "Failed to send OTP", "err");
+  } catch {
+    showMsg(customerError("sendCode"), "err");
   } finally {
     setLoading(sendBtn, false);
   }
@@ -126,7 +192,7 @@ verifyBtn.onclick = async () => {
   hideMsg();
   const code = codeEl.value.trim();
   if (!sentPhone) {
-    showMsg("Send the OTP first.", "err");
+    showMsg("Send the verification code first.", "err");
     return;
   }
   if (!code) {
@@ -143,18 +209,16 @@ verifyBtn.onclick = async () => {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || "Verification failed");
+      showMsg(customerError("verify", res.status), "err");
+      return;
     }
 
     token = data.token;
     $("#controls").classList.remove("hidden");
-    showMsg("Phone verified. You can control the camera now.", "ok");
-
-    await refreshStatus();
-    if (statusTimer) clearInterval(statusTimer);
-    statusTimer = setInterval(refreshStatus, 10000);
-  } catch (err) {
-    showMsg(err.message || "Verification failed", "err");
+    showMsg("You’re verified. Start recording when you’re ready.", "ok");
+    await checkAvailability(true);
+  } catch {
+    showMsg(customerError("verify"), "err");
   } finally {
     setLoading(verifyBtn, false);
   }
@@ -162,67 +226,40 @@ verifyBtn.onclick = async () => {
 
 startBtn.onclick = async () => {
   if (!token) {
-    showMsg("You must verify first.", "err");
+    showMsg("Please verify your phone first.", "err");
     return;
   }
+  if (startRequestPending) return;
+  startRequestPending = true;
   setLoading(startBtn, true);
   try {
+    const available = await checkAvailability(true);
+    if (available === false) return;
     const res = await api("/record/start", {
       method: "POST",
-      headers: { Authorization: "Bearer " + token },
+      headers: {
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
     });
-    const text = await res.text();
-    logAny(outEl, text);
+    await res.text().catch(() => "");
+    outEl.textContent = "";
     if (!res.ok) {
-      showMsg("Could not start recording. See details below.", "err");
+      showMsg(customerError("start", res.status), "err");
     } else {
-      showMsg("Recording started.", "ok");
-      setPill(true);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      heartbeatTimer = setInterval(async () => {
-        try {
-          await api("/record/heartbeat", {
-            method: "POST",
-            headers: { Authorization: "Bearer " + token },
-          });
-        } catch {}
-      }, 60000);
+      showMsg("Recording started. The system will stop automatically at the scheduled time. Thank you for choosing Hatrick LTD. Your video will be sent after the game.", "ok");
+      pill.textContent = "Requested";
+      pill.classList.remove("hidden", "red");
+      startBtn.classList.add("hidden");
     }
-  } catch (err) {
-    logAny(outEl, String(err));
-    showMsg("Network error while starting.", "err");
+  } catch {
+    outEl.textContent = "";
+    showMsg(customerError("start"), "err");
   } finally {
+    startRequestPending = false;
     setLoading(startBtn, false);
   }
 };
 
-stopBtn.onclick = async () => {
-  if (!token) {
-    showMsg("You must verify first.", "err");
-    return;
-  }
-  setLoading(stopBtn, true);
-  try {
-    const res = await api("/record/stop", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + token },
-    });
-    const text = await res.text();
-    logAny(outEl, text);
-    if (!res.ok) {
-      showMsg("Could not stop recording. See details below.", "err");
-    } else {
-      showMsg("Recording stopped.", "ok");
-      setPill(false);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-    }
-  } catch (err) {
-    logAny(outEl, String(err));
-    showMsg("Network error while stopping.", "err");
-  } finally {
-    setLoading(stopBtn, false);
-  }
-};
-
-// initial status (even before verify, if cam id present)
-refreshStatus();
+checkAvailability(true);

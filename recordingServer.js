@@ -142,9 +142,35 @@ function getCameraUrl(type, cameraId) {
   const base = type === 'start' ? process.env.CAMERA_START_URL : process.env.CAMERA_STOP_URL;
   return base.replace('<CAM_ID>', encodeURIComponent(cameraId));
 }
+function getCameraStatusUrl() {
+  return process.env.CAMERA_STATUS_URL;
+}
+function normalizeIsraeliPhone(value) {
+  if (typeof value !== 'string') return null;
 
+  const compact = value.trim().replace(/[\s-]/g, '');
+  if (/^05\d{8}$/.test(compact)) {
+    return `+972${compact.slice(1)}`;
+  }
+  if (/^\+?9725\d{8}$/.test(compact)) {
+    return compact.startsWith('+') ? compact : `+${compact}`;
+  }
+  return null;
+}
+function toIsraeliLocalPhone(value) {
+  if (typeof value !== 'string') return null;
+
+  const compact = value.trim().replace(/[\s-]/g, '');
+  if (/^05\d{8}$/.test(compact)) {
+    return compact;
+  }
+  if (/^\+?9725\d{8}$/.test(compact)) {
+    return `0${compact.replace(/^\+?972/, '')}`;
+  }
+  return null;
+}
 // ── Redis lock helpers (owner-checked unlock) ────────────────────────────────
-const LOCK_TTL_SEC = Number(process.env.LOCK_TTL_SEC || 2 * 60 * 60); // default 2h
+const REQUEST_LOCK_TTL_SEC = Number(process.env.REQUEST_LOCK_TTL_SEC || 60);
 const OTP_LIMIT_SEC = Number(process.env.OTP_LIMIT_SEC || 60);
 
 const UNLOCK_LUA = `
@@ -158,23 +184,27 @@ const UNLOCK_LUA = `
 `;
 
 const lockKey = (cameraId) => `camera:${cameraId}:lock`;
+const requestLockKey = (cameraId) => `camera:${cameraId}:request`;
 
-async function acquireLock(cameraId, ownerString, ttlSec = LOCK_TTL_SEC) {
-  const ok = await redis.set(lockKey(cameraId), ownerString, 'NX', 'EX', ttlSec);
-  return ok === 'OK';
-}
 async function currentLockOwner(cameraId) {
   return redis.get(lockKey(cameraId)); // returns raw owner string or null
 }
 async function releaseLockIfOwner(cameraId, ownerString) {
   return redis.eval(UNLOCK_LUA, 1, lockKey(cameraId), ownerString);
 }
+async function acquireRequestLock(cameraId, ownerString) {
+  const ok = await redis.set(requestLockKey(cameraId), ownerString, 'NX', 'EX', REQUEST_LOCK_TTL_SEC);
+  return ok === 'OK';
+}
+async function releaseRequestLockIfOwner(cameraId, ownerString) {
+  return redis.eval(UNLOCK_LUA, 1, requestLockKey(cameraId), ownerString);
+}
 
 // ── Twilio OTP endpoints ────────────────────────────────────────────────────
 app.post('/auth/send-otp', async (req, res) => {
   try {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Phone required' });
+    const phone = normalizeIsraeliPhone(req.body?.phone);
+    if (!phone) return res.status(400).json({ error: 'Invalid Israeli mobile number' });
 
     // simple rate-limit: one SMS per phone per minute (tolerant to Redis hiccups)
     let blocked = false;
@@ -199,8 +229,10 @@ app.post('/auth/send-otp', async (req, res) => {
 
 app.post('/auth/verify-otp', async (req, res) => {
   try {
-    const { phone, cameraId, code } = req.body;
-    if (!phone || !code || !cameraId)
+    const { cameraId, code } = req.body || {};
+    const phone = normalizeIsraeliPhone(req.body?.phone);
+    if (!phone) return res.status(400).json({ error: 'Invalid Israeli mobile number' });
+    if (!code || !cameraId)
       return res.status(400).json({ error: 'Missing fields' });
 
     const check = await twilio.verify.v2
@@ -227,55 +259,68 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 // ── Start Recording ─────────────────────────────────────────────────────────
 app.post('/record/start', async (req, res) => {
-  let ownerString = null;
+  let requestLockOwner = null;
+  let requestCameraId = null;
+  let requestLockAcquired = false;
   try {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'No token' });
 
     const { phone, cameraId, lockOwnerTokenId } = verifyJwtOrThrow401(token);
+    const localPhone = toIsraeliLocalPhone(phone);
+    if (!localPhone) return res.status(400).json({ error: 'Invalid Israeli mobile number' });
 
-    // concise owner value for atomic compare in Redis
-    ownerString = `${cameraId}:${lockOwnerTokenId}`;
+    requestCameraId = cameraId;
+    requestLockOwner = `${cameraId}:${lockOwnerTokenId}`;
 
-    const locked = await acquireLock(cameraId, ownerString);
+    const locked = await acquireRequestLock(cameraId, requestLockOwner);
     if (!locked) {
-      // Someone else is recording — try to surface phone via DB
-      const active = await Recordings.findOne(
-        { cameraId, status: 'active' },
-        { sort: { startedAt: -1 }, projection: { phone: 1 } }
-      );
-      return res.status(409).json({
-        error: 'Already recording',
-        activeUser: active?.phone
+      return res.status(423).json({
+        error: 'A recording request is already being processed'
       });
     }
+    requestLockAcquired = true;
 
-    // Call camera backend (short timeout)
+    // Request recording using the verified phone identity.
     const url = getCameraUrl('start', cameraId);
-    await axios.post(url, {}, { timeout: 8000 });
+    const recordingRequest = { phone: localPhone };
+    console.log('Requesting recording', { phone: localPhone, cameraId, hasTime: false });
+    await axios.post(url, recordingRequest, {
+      timeout: 8000,
+      headers: { 'Content-Type': 'application/json' }
+    });
 
     await Recordings.insertOne({
       cameraId,
       phone,
-      startedAt: new Date(),
-      status: 'active',
+      requestedAt: new Date(),
+      status: 'requested',
       lockOwnerTokenId
     });
 
-    await sendEmail(`🎥 Recording started on ${cameraId}`, `${phone} started recording.`);
+    await sendEmail(`🎥 Recording requested on ${cameraId}`, `${phone} requested recording.`);
     res.json({ ok: true });
   } catch (e) {
-    // On any failure after lock acquisition, release to avoid deadlock
-    try {
-      if (ownerString) {
-        const camId = ownerString.split(':')[0];
-        await releaseLockIfOwner(camId, ownerString);
-      }
-    } catch (unlockErr) {
-      console.error('unlock failed (start error path):', unlockErr.message);
+    const upstreamStatus = e.response?.status;
+    if (upstreamStatus === 409) {
+      return res.status(409).json({ error: 'Recording is already in progress or unavailable' });
+    }
+    if (upstreamStatus === 422) {
+      return res.status(422).json({ error: 'The recording request could not be accepted' });
+    }
+    if (e.isAxiosError) {
+      return res.status(503).json({ error: 'Recording service is temporarily unavailable' });
     }
     const code = e.statusCode || 500;
-    res.status(code).json({ error: e.message });
+    res.status(code).json({ error: code === 401 ? e.message : 'Unable to complete recording request' });
+  } finally {
+    try {
+      if (requestLockAcquired && requestCameraId && requestLockOwner) {
+        await releaseRequestLockIfOwner(requestCameraId, requestLockOwner);
+      }
+    } catch (unlockErr) {
+      console.error('request lock release failed:', unlockErr.message);
+    }
   }
 });
 
@@ -313,25 +358,41 @@ app.post('/record/stop', async (req, res) => {
 
 // ── Status + Heartbeat ──────────────────────────────────────────────────────
 app.get('/record/status', async (req, res) => {
-  const { cameraId } = req.query;
-  if (!cameraId) return res.status(400).json({ error: 'cameraId required' });
-  const val = await currentLockOwner(cameraId);
-  res.json({ active: !!val });
+  try {
+    const { cameraId } = req.query;
+    if (!cameraId) return res.status(400).json({ error: 'cameraId required' });
+    const statusUrl = getCameraStatusUrl();
+    if (!statusUrl) return res.status(503).json({ error: 'Recording status unavailable' });
+
+    const upstream = await axios.get(statusUrl, {
+      params: { cameraId },
+      timeout: 8000
+    });
+    const data = upstream.data || {};
+    if (typeof data.available !== 'boolean') {
+      return res.status(502).json({ error: 'Recording status unavailable' });
+    }
+    res.json({
+      available: data.available,
+      recording: Boolean(data.recording),
+      status: typeof data.status === 'string' ? data.status : undefined,
+      start: typeof data.start === 'string' ? data.start : undefined,
+      until: typeof data.until === 'string' ? data.until : undefined
+    });
+  } catch {
+    res.status(503).json({ error: 'Recording status unavailable' });
+  }
 });
 
 app.post('/record/heartbeat', async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'No token' });
-    const { cameraId, lockOwnerTokenId } = verifyJwtOrThrow401(token);
-    const ownerString = `${cameraId}:${lockOwnerTokenId}`;
-    const curr = await currentLockOwner(cameraId);
-    if (curr !== ownerString)
-      return res.status(409).json({ error: 'No active lock or not the owner' });
-    await redis.expire(lockKey(cameraId), LOCK_TTL_SEC); // bump TTL
-    res.json({ ok: true });
+    verifyJwtOrThrow401(token);
+    res.json({ ok: true, trackingRecordingState: false });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const code = e.statusCode || 500;
+    res.status(code).json({ error: code === 401 ? e.message : 'Heartbeat unavailable' });
   }
 });
 

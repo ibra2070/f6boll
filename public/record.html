@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Camera Record – Phone Verification</title>
+  <title>Start your recording</title>
 
   <style>
     :root{
@@ -33,6 +33,15 @@
     .muted{color:var(--muted);font-size:13px;margin-top:6px}
     .hidden{display:none !important}
     .panel{margin-top:22px;padding:18px;border:1px dashed #1d332a;border-radius:12px;background:#0b1511}
+    .payment{margin:14px 0;padding:14px;border:1px solid #244836;border-radius:12px;background:#0f1d17;color:#c9f4de;font-size:16px;line-height:1.35}
+    .payment strong{display:block;color:#fff;margin-bottom:4px}
+    .contact-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px}
+    .contact-action{display:flex;align-items:center;justify-content:center;min-height:44px;padding:10px 12px;border:1px solid #2f684e;border-radius:8px;background:#13291f;color:#dcf8ea;font-size:14px;font-weight:600;text-align:center;text-decoration:none;cursor:pointer;font-family:inherit}
+    .contact-action:hover{border-color:var(--green);background:#183428}
+    .contact-action.primary{background:var(--green);border-color:var(--green);color:#08130f}
+    .contact-action.primary:hover{background:var(--green-dark);border-color:var(--green-dark)}
+    .copy-note{min-height:18px;margin-top:8px;color:#9fe9c7;font-size:13px}
+    @media (max-width:560px){.card{padding:20px}.contact-actions{grid-template-columns:1fr}}
     pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0a0a0a;border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:12px;color:#cde8db;max-height:220px;overflow:auto}
     .alert{margin:10px 0;padding:12px 14px;border-radius:10px;border:1px solid #2a2a2a;background:#121212}
     .alert.ok{border-color:#214f3b;background:#0f1d17;color:#9fe9c7}
@@ -45,17 +54,27 @@
   <main class="card">
     <div class="brand">
       <img src="logo.png" alt="Logo" />
-      <div class="title">hii LTD</div>
+      <div class="title">Hatrick LTD</div>
     </div>
 
-    <h1>Verify your phone</h1>
+    <h1>Start your recording</h1>
     <div class="cam" id="camLabel"></div>
 
     <div id="msg" class="alert hidden"></div>
+    <div class="payment">
+      <strong>To receive your video</strong>
+      Send 70₪ via Bit to Hatrick LTD at 050-636-0021 to receive your video.
+      <div class="contact-actions">
+        <a class="contact-action primary" href="tel:0506360021">Save Hatrick number</a>
+        <a class="contact-action" href="https://wa.me/972506360021" target="_blank" rel="noopener">Message Hatrick on WhatsApp</a>
+        <button id="copyNumber" class="contact-action" type="button">Copy Bit number</button>
+      </div>
+      <div id="copyStatus" class="copy-note" aria-live="polite"></div>
+    </div>
 
-    <label for="phone">Phone (E.164 format)</label>
-    <input id="phone" placeholder="+9725..." autocomplete="tel" inputmode="tel" />
-    <button id="send" class="btn">Send OTP</button>
+    <label for="phone">Phone number</label>
+    <input id="phone" placeholder="054-919-5229" autocomplete="tel" inputmode="tel" />
+    <button id="send" class="btn">Send verification code</button>
     <div class="muted">We’ll text you a 6-digit code. Standard carrier rates may apply.</div>
 
     <div id="step2" class="hidden">
@@ -68,14 +87,13 @@
 
     <section id="controls" class="panel hidden">
       <h3 style="margin:0 0 10px">
-        Recording Controls
+        Recording
         <span id="statusPill" class="pill hidden">Checking…</span>
       </h3>
       <div class="row">
         <button id="start" class="btn">Start Recording</button>
-        <button id="stop"  class="btn" style="background:#1c2521;color:#b7d7c8">Stop Recording</button>
       </div>
-      <pre id="out"></pre>
+      <pre id="out" class="hidden"></pre>
     </section>
   </main>
 
@@ -83,4 +101,3 @@
   <script src="record.js" defer></script>
 </body>
 </html>
-
